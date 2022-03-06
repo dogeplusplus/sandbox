@@ -1,10 +1,12 @@
 import jax
 import optax
+import typing as t
 import haiku as hk
 import jax.numpy as jnp
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
+from tqdm import tqdm
 from jax import random
 from einops import rearrange, repeat, reduce
 
@@ -99,52 +101,58 @@ class VisionTransformer(hk.Module):
         return jax.nn.log_softmax(x, axis=1)
 
 
-@jax.jit
-def predict(params, image, k, heads, depth, seq_length, num_tokens, num_classes, patch_size):
-    transformer = VisionTransformer(
-        k,
-        heads,
-        depth,
-        seq_length,
-        num_tokens,
-        num_classes,
-        patch_size,
-    )
-
-
 def main():
-    b = 3
-    t = 5
-    k = 7
-
-    x = jnp.ones((b, t, k))
-
-    def _attention(x):
-        layer = SelfAttention(k)
-        return layer(x)
-
-    attention = hk.transform(_attention)
-
-    rng = random.PRNGKey(0)
-    params = attention.init(rng, x=x)
-    y = attention.apply(params=params, x=x, rng=rng)
-
     batch_size = 16
     epochs = 100
+    num_classes = 101
 
     train_ds, val_ds = tfds.load(
         "food101",
-        split=["train", "test"],
+        split=["train", "validation"],
         shuffle_files=True,
     )
     train_ds = train_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
-    for e in range(epochs):
+    model = hk.transform(VisionTransformer(
+        k=128,
+        heads=8,
+        depth=4,
+        seq_length=100,
+        num_tokens=5,
+        num_classes=101,
+        patch_size=30,
+    ))
+    transformer = hk.without_apply_rng(model)
+
+    xs, _ = next(train_ds)
+    rng = random.PRNGKey(42)
+    params = transformer.init(rng, xs)
+    tx = optax.adam(lr=3e-4)
+    opt_state = tx.init(params)
+
+    def loss_fn(params, xs, ys):
+        logits = transformer.apply(params, xs)
+        one_hot = jax.nn.one_hot(ys, num_classes=num_classes)
+        return optax.softmax_cross_entropy(logits, one_hot).sum()
+
+    @jax.jit
+    def update(
+        params: hk.Params,
+        opt_state: optax.OptState,
+        xs: tf.Tensor,
+        ys: tf.Tensor
+    ) -> t.Tuple[hk.Params, optax.OptState]:
+        grads = jax.grad(loss_fn)(params, xs, ys)
+        updates, opt_state = tx.update(grads, opt_state)
+        new_params = optax.apply_updates(params, updates)
+
+        return new_params, opt_state
+
+    for _ in tqdm.trange(epochs):
         for xs, ys in train_ds:
-            grads = jax.grad(loss)(params, xs, ys)
-            updates, opt_state = optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
+            params, opt_state = update(params, opt_state, xs, ys)
 
 
-
+if __name__ == "__main__":
+    main()

@@ -44,23 +44,26 @@ class SelfAttention(hk.Module):
 
 class TransformerBlock(hk.Module):
     def __init__(self, k, heads):
+        super().__init__()
         self.k = k
         self.heads = heads
 
         self.attention = SelfAttention(self.k, self.heads)
-        self.layer_norm_1 = hk.LayerNorm(axis=[-2, -1])
-        self.forward = hk.Sequential(
-            hk.Linear(4*self.k),
-            hk.ReLU(),
-            hk.Linear(self.k),
-        )
-        self.layer_norm_2 = hk.LayerNorm(axis=[-2, -1])
+        self.layer_norm_1 = hk.LayerNorm(axis=[-2, -1], create_scale=True, create_offset=True)
+        self.linear_1 = hk.Linear(4*self.k)
+        self.linear_2 = hk.Linear(self.k)
+
+        self.layer_norm_2 = hk.LayerNorm(axis=[-2, -1], create_scale=True, create_offset=True)
 
 
     def __call__(self, x):
         attended = self.attention(x)
         x = self.layer_norm_1(attended + x)
-        forward = self.forward(x)
+
+        forward = self.linear_1(x)
+        forward = jax.nn.relu(forward)
+        forward = self.linear_2(forward)
+
         out = self.layer_norm_2(forward + x)
         return out
 
@@ -76,9 +79,10 @@ class VisionTransformer(hk.Module):
         self.num_classes = num_classes
         self.patch_size = patch_size
 
-
-        self.pos_emb = hk.Embed(self.seq_length, self.k)
-        self.token_emb = hk.Embed(self.num_tokens, self.k)
+        # Patch embedding is actually just a dense layer mapping a flattened patch to another array
+        self.pos_emb = hk.Linear(self.k)
+        # Position embedding is regular embedding mapping index to (seq_length,) to (seq_length, k)
+        self.token_emb = hk.Embed(self.seq_length, self.k)
         self.blocks = hk.Sequential([
             TransformerBlock(self.k, self.heads) for _ in range(self.depth)
         ])
@@ -87,11 +91,13 @@ class VisionTransformer(hk.Module):
     def __call__(self, x):
         batch_size = x.shape[0]
 
-        positions = jnp.arange(self.seq_length)
-        positions = repeat(self.pos_emb(positions), "t k -> b t k", b=batch_size)
 
-        x = rearrange(x, "b (h p1) (w p2) c -> b (h w) p1 p2 c", p1=self.patch_size, p2=self.patch_size)
+        x = rearrange(x, "b (h p1) (w p2) c -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size)
         tokens = self.token_emb(x)
+
+        positions = repeat(jnp.arange(self.seq_length, dtype="float"), "t -> b t 1", b=batch_size)
+        positions = self.pos_emb(positions)
+        import pdb; pdb.set_trace()
 
         x = tokens + positions
         x = self.blocks(x)
@@ -111,21 +117,32 @@ def main():
         split=["train", "validation"],
         shuffle_files=True,
     )
-    train_ds = train_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    def resize(example):
+        image = tf.image.resize(example["image"], [256, 256])
+        label = example["label"]
+        image = tf.cast(image, dtype=tf.int32)
+
+        return image, label
+
+    train_ds = train_ds.map(resize).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    def create_transformer(x):
+        return VisionTransformer(
+            k=128,
+            heads=8,
+            depth=4,
+            seq_length=100,
+            num_tokens=5,
+            num_classes=101,
+            patch_size=32,
+        )(x)
 
 
-    model = hk.transform(VisionTransformer(
-        k=128,
-        heads=8,
-        depth=4,
-        seq_length=100,
-        num_tokens=5,
-        num_classes=101,
-        patch_size=30,
-    ))
+    model = hk.transform(create_transformer)
     transformer = hk.without_apply_rng(model)
 
-    xs, _ = next(train_ds)
+    xs, _ = next(iter(train_ds))
     rng = random.PRNGKey(42)
     params = transformer.init(rng, xs)
     tx = optax.adam(lr=3e-4)

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-from tqdm import tqdm
+from tqdm import trange
 from jax import random
 from einops import rearrange, repeat, reduce
 
@@ -74,13 +74,10 @@ class VisionTransformer(hk.Module):
         self.k = k
         self.heads = heads
         self.depth = depth
-        self.seq_length = seq_length
         self.num_tokens = num_tokens
         self.num_classes = num_classes
         self.patch_size = patch_size
 
-        # Position embedding is regular embedding mapping index to (seq_length,) to (seq_length, k)
-        self.pos_emb = hk.Embed(self.seq_length, self.k)
         # Patch embedding is actually just a dense layer mapping a flattened patch to another array
         self.token_emb = hk.Linear(self.k)
         self.blocks = hk.Sequential([
@@ -94,10 +91,11 @@ class VisionTransformer(hk.Module):
 
         x = rearrange(x, "b (h p1) (w p2) c -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size)
         tokens = self.token_emb(x)
-
-        positions = repeat(jnp.arange(self.seq_length, dtype=jnp.int32), "t -> b t 1", b=batch_size)
+        # Position embedding is regular embedding mapping index to (seq_length,) to (seq_length, k)
+        seq_len = x.shape[1]
+        self.pos_emb = hk.Embed(seq_len, self.k)
+        positions = repeat(jnp.arange(seq_len, dtype=jnp.int32), "t -> b t", b=batch_size)
         positions = self.pos_emb(positions)
-        import pdb; pdb.set_trace()
 
         x = tokens + positions
         x = self.blocks(x)
@@ -146,7 +144,7 @@ def main():
     xs, _ = next(iter(train_ds))
     rng = random.PRNGKey(42)
     params = transformer.init(rng, xs)
-    tx = optax.adam(lr=3e-4)
+    tx = optax.adam(learning_rate=3e-4)
     opt_state = tx.init(params)
 
     def loss_fn(params, xs, ys):
@@ -167,7 +165,7 @@ def main():
 
         return new_params, opt_state
 
-    for _ in tqdm.trange(epochs):
+    for _ in trange(epochs):
         for xs, ys in train_ds:
             params, opt_state = update(params, opt_state, xs, ys)
 

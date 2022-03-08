@@ -79,10 +79,10 @@ class VisionTransformer(hk.Module):
         self.num_classes = num_classes
         self.patch_size = patch_size
 
-        # Patch embedding is actually just a dense layer mapping a flattened patch to another array
-        self.pos_emb = hk.Linear(self.k)
         # Position embedding is regular embedding mapping index to (seq_length,) to (seq_length, k)
-        self.token_emb = hk.Embed(self.seq_length, self.k)
+        self.pos_emb = hk.Embed(self.seq_length, self.k)
+        # Patch embedding is actually just a dense layer mapping a flattened patch to another array
+        self.token_emb = hk.Linear(self.k)
         self.blocks = hk.Sequential([
             TransformerBlock(self.k, self.heads) for _ in range(self.depth)
         ])
@@ -95,7 +95,7 @@ class VisionTransformer(hk.Module):
         x = rearrange(x, "b (h p1) (w p2) c -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size)
         tokens = self.token_emb(x)
 
-        positions = repeat(jnp.arange(self.seq_length, dtype="float"), "t -> b t 1", b=batch_size)
+        positions = repeat(jnp.arange(self.seq_length, dtype=jnp.int32), "t -> b t 1", b=batch_size)
         positions = self.pos_emb(positions)
         import pdb; pdb.set_trace()
 
@@ -117,15 +117,16 @@ def main():
         split=["train", "validation"],
         shuffle_files=True,
     )
-
     def resize(example):
         image = tf.image.resize(example["image"], [256, 256])
         label = example["label"]
-        image = tf.cast(image, dtype=tf.int32)
+        image = tf.cast(image, tf.float32)
 
         return image, label
 
     train_ds = train_ds.map(resize).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    train_ds = tfds.as_numpy(train_ds)
+    val_ds = tfds.as_numpy(val_ds)
 
     def create_transformer(x):
         return VisionTransformer(

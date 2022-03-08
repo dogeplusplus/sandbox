@@ -69,7 +69,7 @@ class TransformerBlock(hk.Module):
 
 
 class VisionTransformer(hk.Module):
-    def __init__(self, k, heads, depth, seq_length, num_tokens, num_classes, patch_size):
+    def __init__(self, k, heads, depth, num_tokens, num_classes, patch_size):
         super().__init__()
         self.k = k
         self.heads = heads
@@ -131,7 +131,6 @@ def main():
             k=128,
             heads=8,
             depth=4,
-            seq_length=100,
             num_tokens=5,
             num_classes=101,
             patch_size=32,

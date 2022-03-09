@@ -3,8 +3,8 @@ import optax
 import typing as t
 import haiku as hk
 import jax.numpy as jnp
-import tensorflow as tf
-import tensorflow_datasets as tfds
+# import tensorflow as tf
+# import tensorflow_datasets as tfds
 
 from tqdm import trange
 from jax import random
@@ -26,9 +26,13 @@ class SelfAttention(hk.Module):
         h = self.heads
         k = self.k
 
-        queries = rearrange(self.to_queries(x), "b t (k h)  -> (b h) t k", h=h)
-        keys = rearrange(self.to_keys(x), "b t (k h) -> (b h) t k", h=h)
-        values = rearrange(self.to_values(x), "b t (k h) -> (b h) t k", h=h)
+        queries = self.to_queries(x)
+        keys = self.to_keys(x)
+        values = self.to_values(x)
+
+        queries = rearrange(queries, "b t (k h)  -> (b h) t k", h=h)
+        keys = rearrange(keys, "b t (k h) -> (b h) t k", h=h)
+        values = rearrange(values, "b t (k h) -> (b h) t k", h=h)
 
         queries = queries / (k ** (1/4))
         keys = keys / (k ** (1/4))
@@ -69,7 +73,7 @@ class TransformerBlock(hk.Module):
 
 
 class VisionTransformer(hk.Module):
-    def __init__(self, k, heads, depth, num_tokens, num_classes, patch_size):
+    def __init__(self, k, heads, depth, num_tokens, num_classes, patch_size, seq_len):
         super().__init__()
         self.k = k
         self.heads = heads
@@ -77,6 +81,7 @@ class VisionTransformer(hk.Module):
         self.num_tokens = num_tokens
         self.num_classes = num_classes
         self.patch_size = patch_size
+        self.seq_len = seq_len
 
         # Patch embedding is actually just a dense layer mapping a flattened patch to another array
         self.token_emb = hk.Linear(self.k)
@@ -84,17 +89,15 @@ class VisionTransformer(hk.Module):
             TransformerBlock(self.k, self.heads) for _ in range(self.depth)
         ])
         self.classification = hk.Linear(self.num_classes)
+        self.pos_emb = hk.Embed(seq_len, self.k)
 
     def __call__(self, x):
         batch_size = x.shape[0]
 
-
         x = rearrange(x, "b (h p1) (w p2) c -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size)
         tokens = self.token_emb(x)
         # Position embedding is regular embedding mapping index to (seq_length,) to (seq_length, k)
-        seq_len = x.shape[1]
-        self.pos_emb = hk.Embed(seq_len, self.k)
-        positions = repeat(jnp.arange(seq_len, dtype=jnp.int32), "t -> b t", b=batch_size)
+        positions = repeat(jnp.arange(self.seq_len, dtype=jnp.int32), "t -> b t", b=batch_size)
         positions = self.pos_emb(positions)
 
         x = tokens + positions
@@ -106,43 +109,54 @@ class VisionTransformer(hk.Module):
 
 
 def main():
-    batch_size = 16
+    batch_size = 4
     epochs = 100
     num_classes = 101
 
-    train_ds, val_ds = tfds.load(
-        "food101",
-        split=["train", "validation"],
-        shuffle_files=True,
-    )
-    def resize(example):
-        image = tf.image.resize(example["image"], [256, 256])
-        label = example["label"]
-        image = tf.cast(image, tf.float32)
+    # train_ds, val_ds = tfds.load(
+    #     "food101",
+    #     split=["train", "validation"],
+    #     shuffle_files=True,
+    # )
+    # def resize(example):
+    #     image = tf.image.resize(example["image"], [128, 128])
+    #     label = example["label"]
+    #     image = tf.cast(image, tf.float32)
 
-        return image, label
+    #     return image, label
 
-    train_ds = train_ds.map(resize).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    train_ds = tfds.as_numpy(train_ds)
-    val_ds = tfds.as_numpy(val_ds)
+    # train_ds = train_ds.map(resize).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    # train_ds = tfds.as_numpy(train_ds)
+    # val_ds = tfds.as_numpy(val_ds)
 
-    def create_transformer(x):
-        return VisionTransformer(
-            k=128,
-            heads=8,
-            depth=4,
-            num_tokens=5,
-            num_classes=101,
-            patch_size=32,
-        )(x)
+    # def create_transformer(x):
+    #     return VisionTransformer(
+    #         k=128,
+    #         heads=8,
+    #         depth=2,
+    #         num_tokens=5,
+    #         num_classes=101,
+    #         patch_size=32,
+    #         seq_len=64,
+    #     )(x)
+
+    # model = hk.transform(create_transformer)
+    # transformer = hk.without_apply_rng(model)
+
+    # xs, _ = next(iter(train_ds))
+    # rng = random.PRNGKey(42)
+    # params = transformer.init(rng, xs)
 
 
-    model = hk.transform(create_transformer)
-    transformer = hk.without_apply_rng(model)
+    def create_attn(x):
+        return SelfAttention(128, 8)(x)
 
-    xs, _ = next(iter(train_ds))
+    model = hk.transform(create_attn)
     rng = random.PRNGKey(42)
-    params = transformer.init(rng, xs)
+    xs = jnp.ones((64, 32, 128))
+    params = model.init(rng, xs)
+    param_count = sum(x.size for x in jax.tree_leaves())
+
     tx = optax.adam(learning_rate=3e-4)
     opt_state = tx.init(params)
 
@@ -164,10 +178,13 @@ def main():
 
         return new_params, opt_state
 
-    for _ in trange(epochs):
+    pbar = trange(epochs)
+    for _ in pbar:
+        step = 0
         for xs, ys in train_ds:
             params, opt_state = update(params, opt_state, xs, ys)
-
+            pbar.update(step)
+            step += 1
 
 if __name__ == "__main__":
     main()

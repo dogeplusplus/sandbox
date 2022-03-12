@@ -3,15 +3,14 @@ import optax
 import numpy as np
 import typing as t
 import haiku as hk
-import jax.nn as nn
 import jax.numpy as jnp
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-from tqdm import trange
+from tqdm import tqdm
 from jax import random
 from functools import partial
-from einops import rearrange, repeat, reduce
+from einops import rearrange, reduce
 
 
 class SelfAttention(hk.Module):
@@ -68,7 +67,7 @@ class TransformerBlock(hk.Module):
         x = self.layer_norm_1(attended + x)
 
         forward = self.linear_1(x)
-        forward = jax.nn.relu(forward)
+        forward = jax.nn.gelu(forward)
         forward = self.linear_2(forward)
 
         out = self.layer_norm_2(forward + x)
@@ -128,8 +127,39 @@ class VisionTransformer(hk.Module):
         return jax.nn.log_softmax(x, axis=1)
 
 
+def resize_image(example):
+    image = tf.image.resize(example["image"], [32, 32])
+    label = example["label"]
+    image = tf.cast(image, tf.float32)
+
+    return image, label
+
+
+def create_transformer(x):
+    return VisionTransformer(
+        k=128,
+        heads=8,
+        depth=4,
+        num_tokens=5,
+        num_classes=101,
+        patch_size=32,
+        seq_len=64,
+    )(x)
+
+
 def main():
-    batch_size = 2
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            tf.config.set_logical_device_configuration(
+                gpus[0],
+                [tf.config.LogicalDeviceConfiguration(memory_limit=9182)])
+            logical_gpus = tf.config.list_logical_devices('GPU')
+            print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+        except RuntimeError as e:
+            print(e)
+
+    batch_size = 4
     epochs = 100
     num_classes = 101
 
@@ -138,45 +168,34 @@ def main():
         split=["train", "validation"],
         shuffle_files=True,
     )
-    def resize(example):
-        image = tf.image.resize(example["image"], [32, 32])
-        label = example["label"]
-        image = tf.cast(image, tf.float32)
 
-        return image, label
-
-    train_ds = train_ds.map(resize).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    train_ds = train_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.map(resize_image).prefetch(tf.data.AUTOTUNE)
     train_ds = tfds.as_numpy(train_ds)
     val_ds = tfds.as_numpy(val_ds)
 
-    def create_transformer(x):
-        return VisionTransformer(
-            k=128,
-            heads=8,
-            depth=4,
-            num_tokens=5,
-            num_classes=101,
-            patch_size=32,
-            seq_len=64,
-        )(x)
 
     model = hk.transform_with_state(create_transformer)
     transformer = hk.without_apply_rng(model)
-
     xs, _ = next(iter(train_ds))
 
     rng = random.PRNGKey(42)
     params, state = transformer.init(rng, xs)
-    param_count = sum(x.size for x in jax.tree_leaves(params))
-    import pdb; pdb.set_trace()
 
     tx = optax.adam(learning_rate=3e-4)
     opt_state = tx.init(params)
 
+    @jax.jit
     def loss_fn(params, state, xs, ys):
-        logits = transformer.apply(params, state, xs)
+        logits, _ = transformer.apply(params, state, xs)
         one_hot = jax.nn.one_hot(ys, num_classes=num_classes)
         return optax.softmax_cross_entropy(logits, one_hot).sum()
+
+    @jax.jit
+    def accuracy(params, state, xs, ys):
+        logits, _ = transformer.apply(params, state, xs)
+        classes = logits.argmax(axis=-1)
+        return jnp.mean(classes == ys)
 
     @jax.jit
     def update(
@@ -192,13 +211,27 @@ def main():
 
         return new_params, opt_state
 
-    pbar = trange(epochs)
-    for _ in pbar:
+    n = len(train_ds)
+    for e in range(epochs):
         step = 0
-        for xs, ys in train_ds:
+        epoch_acc = 0
+        epoch_loss = 0
+
+        desc = f"Epoch {e}"
+        train_bar = tqdm(train_ds, total=n, ncols=0, desc=desc)
+        for xs, ys in train_bar:
             params, opt_state = update(params, state, opt_state, xs, ys)
-            pbar.update(step)
+            loss = loss_fn(params, state, xs, ys)
+            acc = accuracy(params, state, xs, ys)
+
             step += 1
+            epoch_acc *= (step - 1) / step
+            epoch_acc += acc / step
+            epoch_loss *= (step - 1) / step
+            epoch_loss += loss / step
+
+            train_bar.set_postfix(loss=epoch_loss, acc=epoch_acc)
+
 
 if __name__ == "__main__":
     main()

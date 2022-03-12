@@ -98,17 +98,15 @@ class SinPosEmb(hk.Module):
 
 
 class VisionTransformer(hk.Module):
-    def __init__(self, k, heads, depth, num_tokens, num_classes, patch_size, seq_len):
+    def __init__(self, k, heads, depth, num_classes, patch_size):
         super().__init__()
         self.k = k
         self.heads = heads
         self.depth = depth
-        self.num_tokens = num_tokens
         self.num_classes = num_classes
         self.patch_size = patch_size
-        self.seq_len = seq_len
 
-        # Patch embedding is actually just a dense layer mapping a flattened patch to another array
+        # Patch embedding is just a dense layer mapping a flattened patch to another array
         self.token_emb = hk.Linear(self.k)
         self.blocks = hk.Sequential([
             TransformerBlock(self.k, self.heads) for _ in range(self.depth)
@@ -128,7 +126,7 @@ class VisionTransformer(hk.Module):
 
 
 def resize_image(example):
-    image = tf.image.resize(example["image"], [32, 32])
+    image = tf.image.resize(example["image"], [256, 256])
     label = example["label"]
     image = tf.cast(image, tf.float32)
 
@@ -138,12 +136,10 @@ def resize_image(example):
 def create_transformer(x):
     return VisionTransformer(
         k=128,
-        heads=8,
-        depth=4,
-        num_tokens=5,
+        heads=12,
+        depth=768,
         num_classes=101,
         patch_size=32,
-        seq_len=64,
     )(x)
 
 
@@ -153,13 +149,13 @@ def main():
         try:
             tf.config.set_logical_device_configuration(
                 gpus[0],
-                [tf.config.LogicalDeviceConfiguration(memory_limit=9182)])
+                [tf.config.LogicalDeviceConfiguration(memory_limit=2048)])
             logical_gpus = tf.config.list_logical_devices('GPU')
             print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
         except RuntimeError as e:
             print(e)
 
-    batch_size = 4
+    batch_size = 64
     epochs = 100
     num_classes = 101
 
@@ -211,13 +207,15 @@ def main():
 
         return new_params, opt_state
 
+    show_every = 100
     n = len(train_ds)
+
     for e in range(epochs):
         step = 0
-        epoch_acc = 0
-        epoch_loss = 0
+        train_acc = 0
+        train_loss = 0
 
-        desc = f"Epoch {e}"
+        desc = f"Train Epoch {e}"
         train_bar = tqdm(train_ds, total=n, ncols=0, desc=desc)
         for xs, ys in train_bar:
             params, opt_state = update(params, state, opt_state, xs, ys)
@@ -225,12 +223,32 @@ def main():
             acc = accuracy(params, state, xs, ys)
 
             step += 1
-            epoch_acc *= (step - 1) / step
-            epoch_acc += acc / step
-            epoch_loss *= (step - 1) / step
-            epoch_loss += loss / step
+            train_acc *= (step - 1) / step
+            train_acc += acc / step
+            train_loss *= (step - 1) / step
+            train_loss += loss / step
 
-            train_bar.set_postfix(loss=epoch_loss, acc=epoch_acc)
+            if step % show_every == 0:
+                train_bar.set_postfix(loss=round(train_loss, 3), acc=round(train_acc, 3))
+
+
+        desc = f"Valid Epoch {e}"
+        val_bar = tqdm(train_ds, total=n, ncols=0, desc=desc)
+        step = 0
+        val_acc = 0
+        val_loss = 0
+        for xs, ys in val_bar:
+            loss = loss_fn(params, state, xs, ys)
+            acc = accuracy(params, state, xs, ys)
+
+            step += 1
+            val_acc *= (step - 1) / step
+            val_acc += acc / step
+            val_loss *= (step - 1) / step
+            val_loss += loss / step
+
+            if step % show_every == 0:
+                val_bar.set_postfix(loss=round(val_loss, 3), acc=round(val_acc, 3))
 
 
 if __name__ == "__main__":

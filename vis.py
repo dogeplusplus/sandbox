@@ -13,6 +13,7 @@ from functools import partial
 from einops import rearrange, reduce
 from collections import defaultdict
 
+
 class SelfAttention(hk.Module):
     def __init__(self, k, heads=8):
         super().__init__()
@@ -126,7 +127,7 @@ class VisionTransformer(hk.Module):
 
 
 def resize_image(example):
-    image = tf.image.resize(example["image"], [256, 256])
+    image = tf.image.resize(example["image"], [32, 32])
     label = example["label"]
     image = tf.cast(image, tf.float32)
 
@@ -138,8 +139,8 @@ def create_transformer(x):
         k=512,
         heads=12,
         depth=12,
-        num_classes=101,
-        patch_size=32,
+        num_classes=100,
+        patch_size=4,
     )(x)
 
 
@@ -155,11 +156,11 @@ def main():
 
     batch_size = 64
     epochs = 100
-    num_classes = 101
+    num_classes = 100
 
     train_ds, val_ds = tfds.load(
-        "food101",
-        split=["train", "validation"],
+        "cifar100",
+        split=["train", "test"],
         shuffle_files=True,
     )
 

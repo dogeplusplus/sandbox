@@ -11,7 +11,7 @@ from tqdm import tqdm
 from jax import random
 from functools import partial
 from einops import rearrange, reduce
-
+from collections import defaultdict
 
 class SelfAttention(hk.Module):
     def __init__(self, k, heads=8):
@@ -135,25 +135,23 @@ def resize_image(example):
 
 def create_transformer(x):
     return VisionTransformer(
-        k=128,
+        k=512,
         heads=12,
-        depth=768,
+        depth=12,
         num_classes=101,
         patch_size=32,
     )(x)
 
 
+def update_metrics(step, metrics, new):
+    for name, value in new.items():
+        metrics[name] = (metrics[name] * (step - 1) + value)/ step
+
+    return metrics
+
+
 def main():
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        try:
-            tf.config.set_logical_device_configuration(
-                gpus[0],
-                [tf.config.LogicalDeviceConfiguration(memory_limit=2048)])
-            logical_gpus = tf.config.list_logical_devices('GPU')
-            print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
-        except RuntimeError as e:
-            print(e)
+    tf.config.set_visible_devices([], 'GPU')
 
     batch_size = 64
     epochs = 100
@@ -188,10 +186,20 @@ def main():
         return optax.softmax_cross_entropy(logits, one_hot).sum()
 
     @jax.jit
-    def accuracy(params, state, xs, ys):
+    def calculate_metrics(params, state, xs, ys, k=5):
         logits, _ = transformer.apply(params, state, xs)
         classes = logits.argmax(axis=-1)
-        return jnp.mean(classes == ys)
+        accuracy = jnp.mean(classes == ys)
+
+        top_k = np.argsort(logits, axis=-1)[:, -k:]
+        hits = (ys == top_k.T).any(axis=0)
+        top_k_accuracy = jnp.mean(hits)
+
+        metrics = {
+            "accuracy": accuracy,
+            f"top_{k}_acc": top_k_accuracy,
+        }
+        return metrics
 
     @jax.jit
     def update(
@@ -200,55 +208,43 @@ def main():
         opt_state: optax.OptState,
         xs: tf.Tensor,
         ys: tf.Tensor
-    ) -> t.Tuple[hk.Params, optax.OptState]:
-        grads = jax.grad(loss_fn)(params, state, xs, ys)
+    ) -> t.Tuple[hk.Params, optax.OptState, jnp.ndarray]:
+        loss, grads = jax.value_and_grad(loss_fn)(params, state, xs, ys)
         updates, opt_state = tx.update(grads, opt_state)
         new_params = optax.apply_updates(params, updates)
 
-        return new_params, opt_state
+        return new_params, opt_state, loss
 
-    show_every = 100
-    n = len(train_ds)
-
+    show_every = 5
     for e in range(epochs):
         step = 0
-        train_acc = 0
-        train_loss = 0
-
+        metrics_dict = defaultdict(lambda: 0)
         desc = f"Train Epoch {e}"
-        train_bar = tqdm(train_ds, total=n, ncols=0, desc=desc)
+        train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=desc)
         for xs, ys in train_bar:
-            params, opt_state = update(params, state, opt_state, xs, ys)
-            loss = loss_fn(params, state, xs, ys)
-            acc = accuracy(params, state, xs, ys)
+            params, opt_state, loss = update(params, state, opt_state, xs, ys)
+            metrics = calculate_metrics(params, state, xs, ys)
 
             step += 1
-            train_acc *= (step - 1) / step
-            train_acc += acc / step
-            train_loss *= (step - 1) / step
-            train_loss += loss / step
-
+            metrics_dict = update_metrics(step, metrics_dict, metrics)
             if step % show_every == 0:
-                train_bar.set_postfix(loss=round(train_loss, 3), acc=round(train_acc, 3))
+                metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
+                train_bar.set_postfix(loss=loss, **metrics_display)
 
-
-        desc = f"Valid Epoch {e}"
-        val_bar = tqdm(train_ds, total=n, ncols=0, desc=desc)
         step = 0
-        val_acc = 0
-        val_loss = 0
+        metrics = defaultdict(lambda: 0)
+        desc = f"Valid Epoch {e}"
+        val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=desc)
+
         for xs, ys in val_bar:
             loss = loss_fn(params, state, xs, ys)
-            acc = accuracy(params, state, xs, ys)
+            metrics = calculate_metrics(params, state, xs, ys)
 
             step += 1
-            val_acc *= (step - 1) / step
-            val_acc += acc / step
-            val_loss *= (step - 1) / step
-            val_loss += loss / step
-
+            metrics_dict = update_metrics(step, metrics_dict, metrics)
             if step % show_every == 0:
-                val_bar.set_postfix(loss=round(val_loss, 3), acc=round(val_acc, 3))
+                metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
+                val_bar.set_postfix(loss=loss, **metrics_display)
 
 
 if __name__ == "__main__":

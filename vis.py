@@ -1,5 +1,6 @@
 import jax
 import optax
+import pickle
 import numpy as np
 import typing as t
 import haiku as hk
@@ -138,7 +139,7 @@ def create_transformer(x):
     return VisionTransformer(
         k=512,
         heads=12,
-        depth=12,
+        depth=2,
         num_classes=100,
         patch_size=4,
     )(x)
@@ -146,7 +147,7 @@ def create_transformer(x):
 
 def update_metrics(step, metrics, new):
     for name, value in new.items():
-        metrics[name] = (metrics[name] * (step - 1) + value)/ step
+        metrics[name] = (metrics[name] * (step - 1) + value) / step
 
     return metrics
 
@@ -157,6 +158,8 @@ def main():
     batch_size = 64
     epochs = 100
     num_classes = 100
+    save_every = 10
+    show_every = 5
 
     train_ds, val_ds = tfds.load(
         "cifar100",
@@ -165,10 +168,9 @@ def main():
     )
 
     train_ds = train_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds.map(resize_image).prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
     train_ds = tfds.as_numpy(train_ds)
     val_ds = tfds.as_numpy(val_ds)
-
 
     model = hk.transform_with_state(create_transformer)
     transformer = hk.without_apply_rng(model)
@@ -216,7 +218,6 @@ def main():
 
         return new_params, opt_state, loss
 
-    show_every = 5
     for e in range(epochs):
         step = 0
         metrics_dict = defaultdict(lambda: 0)
@@ -246,6 +247,10 @@ def main():
             if step % show_every == 0:
                 metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
                 val_bar.set_postfix(loss=loss, **metrics_display)
+
+        if e % save_every == 0:
+            pickle.dump(params, open("weights.pkl", "wb"))
+            pickle.dump(opt_state, open("optimizer.pkl", "wb"))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import jax
 import optax
 import pickle
+import mlflow
 import numpy as np
 import typing as t
 import haiku as hk
@@ -139,7 +140,7 @@ def create_transformer(x):
     return VisionTransformer(
         k=512,
         heads=12,
-        depth=2,
+        depth=4,
         num_classes=100,
         patch_size=4,
     )(x)
@@ -155,8 +156,8 @@ def update_metrics(step, metrics, new):
 def main():
     tf.config.set_visible_devices([], 'GPU')
 
-    batch_size = 64
-    epochs = 100
+    batch_size = 256
+    epochs = 500
     num_classes = 100
     save_every = 10
     show_every = 5
@@ -218,11 +219,14 @@ def main():
 
         return new_params, opt_state, loss
 
+    mlflow.set_experiment("cifar_haiku")
+    mlflow.start_run()
     for e in range(epochs):
         step = 0
         metrics_dict = defaultdict(lambda: 0)
         desc = f"Train Epoch {e}"
         train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=desc)
+
         for xs, ys in train_bar:
             params, opt_state, loss = update(params, state, opt_state, xs, ys)
             metrics = calculate_metrics(params, state, xs, ys)
@@ -233,8 +237,11 @@ def main():
                 metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
                 train_bar.set_postfix(loss=loss, **metrics_display)
 
+        train_metrics = {f"train_{k}": float(v) for k, v in metrics_dict.items()}
+        mlflow.log_metrics(train_metrics, step=e)
+
         step = 0
-        metrics = defaultdict(lambda: 0)
+        metrics_dict = defaultdict(lambda: 0)
         desc = f"Valid Epoch {e}"
         val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=desc)
 
@@ -248,9 +255,14 @@ def main():
                 metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
                 val_bar.set_postfix(loss=loss, **metrics_display)
 
+        val_metrics = {f"valid_{k}": float(v) for k, v in metrics_dict.items()}
+        mlflow.log_metrics(val_metrics, step=e)
+
         if e % save_every == 0:
             pickle.dump(params, open("weights.pkl", "wb"))
+            mlflow.log_artifact("weights.pkl", "weights")
             pickle.dump(opt_state, open("optimizer.pkl", "wb"))
+            mlflow.log_artifact("optimizer.pkl", "optimizer")
 
 
 if __name__ == "__main__":

@@ -131,7 +131,7 @@ class VisionTransformer(hk.Module):
 def resize_image(example):
     image = tf.image.resize(example["image"], [32, 32])
     label = example["label"]
-    image = tf.cast(image, tf.float32)
+    image = tf.image.per_image_standardization(image)
 
     return image, label
 
@@ -140,7 +140,7 @@ def create_transformer(x):
     return VisionTransformer(
         k=512,
         heads=12,
-        depth=4,
+        depth=2,
         num_classes=100,
         patch_size=4,
     )(x)

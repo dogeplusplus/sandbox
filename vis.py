@@ -9,11 +9,13 @@ import jax.numpy as jnp
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
+
 from tqdm import tqdm
 from jax import random
 from functools import partial
-from einops import rearrange, reduce
+from argparse import ArgumentParser
 from collections import defaultdict
+from einops import rearrange, reduce, repeat
 
 
 class SelfAttention(hk.Module):
@@ -63,7 +65,6 @@ class TransformerBlock(hk.Module):
         self.linear_2 = hk.Linear(self.k)
 
         self.layer_norm_2 = hk.LayerNorm(axis=[-2, -1], create_scale=True, create_offset=True)
-
 
     def __call__(self, x):
         attended = self.attention(x)
@@ -117,15 +118,27 @@ class VisionTransformer(hk.Module):
         self.classification = hk.Linear(self.num_classes)
         self.pos_emb = SinPosEmb()
 
+        self.cls_token = hk.get_parameter("cls", shape=[k], init=hk.initializers.RandomNormal())
+
+        self.classification= hk.Sequential([
+            hk.LayerNorm(axis=[-2, -1], create_scale=True, create_offset=True),
+            hk.Linear(self.num_classes),
+        ])
+
     def __call__(self, x):
+        batch_size = x.shape[0]
         x = rearrange(x, "b (h p1) (w p2) c -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size)
         tokens = self.token_emb(x)
-        x = self.pos_emb(tokens)
-        x = self.blocks(x)
-        x = self.classification(x)
-        x = reduce(x, "b t c -> b c", "mean")
 
-        return jax.nn.log_softmax(x, axis=1)
+        cls_token = repeat(self.cls_token, "k -> b 1 k", b=batch_size)
+        combined_tokens = jnp.concatenate([cls_token, tokens], axis=1)
+
+        x = self.pos_emb(combined_tokens)
+        x = self.blocks(x)
+        x = x[:, 0]
+        x = self.classification(x)
+
+        return x
 
 
 def resize_image(example):
@@ -153,7 +166,15 @@ def update_metrics(step, metrics, new):
     return metrics
 
 
+def parse_arguments():
+    parser = ArgumentParser("Train Vision Transformer")
+    parser.add_argument("--debug", action="store_true", default=False)
+    args = parser.parse_args()
+    return args
+
+
 def main():
+    args = parse_arguments()
     tf.config.set_visible_devices([], 'GPU')
 
     batch_size = 256
@@ -219,8 +240,10 @@ def main():
 
         return new_params, opt_state, loss
 
-    mlflow.set_experiment("cifar_haiku")
-    mlflow.start_run()
+    if not args.debug:
+        mlflow.set_experiment("cifar_haiku")
+        mlflow.start_run()
+
     for e in range(epochs):
         step = 0
         metrics_dict = defaultdict(lambda: 0)
@@ -230,15 +253,17 @@ def main():
         for xs, ys in train_bar:
             params, opt_state, loss = update(params, state, opt_state, xs, ys)
             metrics = calculate_metrics(params, state, xs, ys)
+            metrics["loss"] = loss
 
             step += 1
             metrics_dict = update_metrics(step, metrics_dict, metrics)
             if step % show_every == 0:
                 metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
-                train_bar.set_postfix(loss=loss, **metrics_display)
+                train_bar.set_postfix(**metrics_display)
 
         train_metrics = {f"train_{k}": float(v) for k, v in metrics_dict.items()}
-        mlflow.log_metrics(train_metrics, step=e)
+        if not args.debug:
+            mlflow.log_metrics(train_metrics, step=e)
 
         step = 0
         metrics_dict = defaultdict(lambda: 0)
@@ -248,17 +273,20 @@ def main():
         for xs, ys in val_bar:
             loss = loss_fn(params, state, xs, ys)
             metrics = calculate_metrics(params, state, xs, ys)
+            metrics["loss"] = loss
 
             step += 1
             metrics_dict = update_metrics(step, metrics_dict, metrics)
             if step % show_every == 0:
                 metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
-                val_bar.set_postfix(loss=loss, **metrics_display)
+                val_bar.set_postfix(**metrics_display)
 
         val_metrics = {f"valid_{k}": float(v) for k, v in metrics_dict.items()}
-        mlflow.log_metrics(val_metrics, step=e)
 
-        if e % save_every == 0:
+        if not args.debug:
+            mlflow.log_metrics(val_metrics, step=e)
+
+        if e % save_every == 0 and not args.debug:
             pickle.dump(params, open("weights.pkl", "wb"))
             mlflow.log_artifact("weights.pkl", "weights")
             pickle.dump(opt_state, open("optimizer.pkl", "wb"))

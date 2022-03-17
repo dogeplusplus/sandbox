@@ -15,7 +15,7 @@ from jax import random
 from functools import partial
 from argparse import ArgumentParser
 from collections import defaultdict
-from einops import rearrange, reduce, repeat
+from einops import rearrange, repeat
 
 
 class SelfAttention(hk.Module):
@@ -54,10 +54,11 @@ class SelfAttention(hk.Module):
 
 
 class TransformerBlock(hk.Module):
-    def __init__(self, k, heads):
+    def __init__(self, k, heads, dropout):
         super().__init__()
         self.k = k
         self.heads = heads
+        self.dropout = dropout
 
         self.attention = SelfAttention(self.k, self.heads)
         self.layer_norm_1 = hk.LayerNorm(axis=[-2, -1], create_scale=True, create_offset=True)
@@ -66,15 +67,22 @@ class TransformerBlock(hk.Module):
 
         self.layer_norm_2 = hk.LayerNorm(axis=[-2, -1], create_scale=True, create_offset=True)
 
-    def __call__(self, x):
+    def __call__(self, x, inference=False):
+        dropout = 0. if inference else self.dropout
+
         attended = self.attention(x)
         x = self.layer_norm_1(attended + x)
 
+        key1 = hk.next_rng_key()
+        key2 = hk.next_rng_key()
+
         forward = self.linear_1(x)
         forward = jax.nn.gelu(forward)
+        forward = hk.dropout(key1, dropout, forward)
         forward = self.linear_2(forward)
+        forward = self.layer_norm_2(forward + x)
+        out = hk.dropout(key2, dropout, forward)
 
-        out = self.layer_norm_2(forward + x)
         return out
 
 
@@ -102,22 +110,26 @@ class SinPosEmb(hk.Module):
 
 
 class VisionTransformer(hk.Module):
-    def __init__(self, k, heads, depth, num_classes, patch_size):
+    def __init__(self, k, heads, depth, num_classes, patch_size, image_size, dropout):
         super().__init__()
         self.k = k
         self.heads = heads
         self.depth = depth
         self.num_classes = num_classes
         self.patch_size = patch_size
+        self.image_size = image_size
+        self.dropout = dropout
 
         # Patch embedding is just a dense layer mapping a flattened patch to another array
         self.token_emb = hk.Linear(self.k)
         self.blocks = hk.Sequential([
-            TransformerBlock(self.k, self.heads) for _ in range(self.depth)
+            TransformerBlock(self.k, self.heads, dropout) for _ in range(self.depth)
         ])
         self.classification = hk.Linear(self.num_classes)
-        self.pos_emb = SinPosEmb()
+        height, width = image_size
+        num_patches = (height // patch_size) * (width // patch_size) + 1
 
+        self.pos_emb = hk.get_parameter("pos_emb", shape=[num_patches, k], init=hk.initializers.RandomNormal())
         self.cls_token = hk.get_parameter("cls", shape=[k], init=hk.initializers.RandomNormal())
 
         self.classification= hk.Sequential([
@@ -125,7 +137,9 @@ class VisionTransformer(hk.Module):
             hk.Linear(self.num_classes),
         ])
 
-    def __call__(self, x):
+    def __call__(self, x, inference=False):
+        dropout = 0. if inference else self.dropout
+
         batch_size = x.shape[0]
         x = rearrange(x, "b (h p1) (w p2) c -> b (h w) (p1 p2 c)", p1=self.patch_size, p2=self.patch_size)
         tokens = self.token_emb(x)
@@ -133,7 +147,8 @@ class VisionTransformer(hk.Module):
         cls_token = repeat(self.cls_token, "k -> b 1 k", b=batch_size)
         combined_tokens = jnp.concatenate([cls_token, tokens], axis=1)
 
-        x = self.pos_emb(combined_tokens)
+        x = self.pos_emb + combined_tokens
+        x = hk.dropout(hk.next_rng_key(), dropout, x)
         x = self.blocks(x)
         x = x[:, 0]
         x = self.classification(x)
@@ -142,7 +157,7 @@ class VisionTransformer(hk.Module):
 
 
 def resize_image(example):
-    image = tf.image.resize(example["image"], [32, 32])
+    image = tf.image.resize(example["image"], [320, 320])
     label = example["label"]
     image = tf.image.per_image_standardization(image)
 
@@ -153,9 +168,11 @@ def create_transformer(x):
     return VisionTransformer(
         k=512,
         heads=12,
-        depth=2,
-        num_classes=100,
-        patch_size=4,
+        depth=6,
+        num_classes=10,
+        patch_size=32,
+        image_size=(320, 320),
+        dropout=0.2,
     )(x)
 
 
@@ -177,15 +194,15 @@ def main():
     args = parse_arguments()
     tf.config.set_visible_devices([], 'GPU')
 
-    batch_size = 256
-    epochs = 500
-    num_classes = 100
+    batch_size = 64
+    epochs = 100
+    num_classes = 10
     save_every = 10
     show_every = 5
 
     train_ds, val_ds = tfds.load(
-        "cifar100",
-        split=["train", "test"],
+        "imagenette/320px-v2",
+        split=["train", "validation"],
         shuffle_files=True,
     )
 
@@ -194,8 +211,7 @@ def main():
     train_ds = tfds.as_numpy(train_ds)
     val_ds = tfds.as_numpy(val_ds)
 
-    model = hk.transform_with_state(create_transformer)
-    transformer = hk.without_apply_rng(model)
+    transformer = hk.transform_with_state(create_transformer)
     xs, _ = next(iter(train_ds))
 
     rng = random.PRNGKey(42)
@@ -206,13 +222,15 @@ def main():
 
     @jax.jit
     def loss_fn(params, state, xs, ys):
-        logits, _ = transformer.apply(params, state, xs)
+        key = hk.next_rng_key()
+        logits, _ = transformer.apply(params, key, state, xs)
         one_hot = jax.nn.one_hot(ys, num_classes=num_classes)
         return optax.softmax_cross_entropy(logits, one_hot).sum()
 
     @jax.jit
     def calculate_metrics(params, state, xs, ys, k=5):
-        logits, _ = transformer.apply(params, state, xs)
+        key = hk.next_rng_key()
+        logits, _ = transformer.apply(params, key, state, xs)
         classes = logits.argmax(axis=-1)
         accuracy = jnp.mean(classes == ys)
 
@@ -258,7 +276,7 @@ def main():
             step += 1
             metrics_dict = update_metrics(step, metrics_dict, metrics)
             if step % show_every == 0:
-                metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
+                metrics_display = {k: str(v)[:4] for k, v in metrics_dict.items()}
                 train_bar.set_postfix(**metrics_display)
 
         train_metrics = {f"train_{k}": float(v) for k, v in metrics_dict.items()}
@@ -278,7 +296,7 @@ def main():
             step += 1
             metrics_dict = update_metrics(step, metrics_dict, metrics)
             if step % show_every == 0:
-                metrics_display = {k: round(v, 3) for k, v in metrics_dict.items()}
+                metrics_display = {k: str(v)[:4] for k, v in metrics_dict.items()}
                 val_bar.set_postfix(**metrics_display)
 
         val_metrics = {f"valid_{k}": float(v) for k, v in metrics_dict.items()}

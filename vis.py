@@ -211,30 +211,30 @@ def main():
     train_ds = tfds.as_numpy(train_ds)
     val_ds = tfds.as_numpy(val_ds)
 
-    transformer = hk.transform_with_state(create_transformer)
+    transformer = hk.transform(create_transformer)
     xs, _ = next(iter(train_ds))
 
     rng = random.PRNGKey(42)
-    params, state = transformer.init(rng, xs)
+    params = transformer.init(rng, xs)
 
     tx = optax.adam(learning_rate=3e-4)
     opt_state = tx.init(params)
 
+    rng_seq = hk.PRNGSequence(42)
+
     @jax.jit
-    def loss_fn(params, state, xs, ys):
-        key = hk.next_rng_key()
-        logits, _ = transformer.apply(params, key, state, xs)
+    def loss_fn(params, key, xs, ys):
+        logits = transformer.apply(params, key, xs)
         one_hot = jax.nn.one_hot(ys, num_classes=num_classes)
         return optax.softmax_cross_entropy(logits, one_hot).sum()
 
     @jax.jit
-    def calculate_metrics(params, state, xs, ys, k=5):
-        key = hk.next_rng_key()
-        logits, _ = transformer.apply(params, key, state, xs)
+    def calculate_metrics(params, key, xs, ys, k=5):
+        logits = transformer.apply(params, key, xs)
         classes = logits.argmax(axis=-1)
         accuracy = jnp.mean(classes == ys)
 
-        top_k = np.argsort(logits, axis=-1)[:, -k:]
+        top_k = jnp.argsort(logits, axis=-1)[:, -k:]
         hits = (ys == top_k.T).any(axis=0)
         top_k_accuracy = jnp.mean(hits)
 
@@ -247,12 +247,12 @@ def main():
     @jax.jit
     def update(
         params: hk.Params,
-        state: hk.State,
         opt_state: optax.OptState,
+        key: jax.random.PRNGKey,
         xs: tf.Tensor,
         ys: tf.Tensor
     ) -> t.Tuple[hk.Params, optax.OptState, jnp.ndarray]:
-        loss, grads = jax.value_and_grad(loss_fn)(params, state, xs, ys)
+        loss, grads = jax.value_and_grad(loss_fn)(params, key, xs, ys)
         updates, opt_state = tx.update(grads, opt_state)
         new_params = optax.apply_updates(params, updates)
 
@@ -269,8 +269,9 @@ def main():
         train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=desc)
 
         for xs, ys in train_bar:
-            params, opt_state, loss = update(params, state, opt_state, xs, ys)
-            metrics = calculate_metrics(params, state, xs, ys)
+            key = next(rng_seq)
+            params, opt_state, loss = update(params, opt_state, key, xs, ys)
+            metrics = calculate_metrics(params, key, xs, ys)
             metrics["loss"] = loss
 
             step += 1
@@ -289,8 +290,9 @@ def main():
         val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=desc)
 
         for xs, ys in val_bar:
-            loss = loss_fn(params, state, xs, ys)
-            metrics = calculate_metrics(params, state, xs, ys)
+            key = next(rng_seq)
+            loss = loss_fn(params, key, xs, ys)
+            metrics = calculate_metrics(params, key, xs, ys)
             metrics["loss"] = loss
 
             step += 1

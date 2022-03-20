@@ -129,7 +129,7 @@ class VisionTransformer(hk.Module):
         height, width = image_size
         num_patches = (height // patch_size) * (width // patch_size) + 1
 
-        self.pos_emb = hk.get_parameter("pos_emb", shape=[num_patches, k], init=hk.initializers.RandomNormal())
+        self.pos_emb = hk.Embed(vocab_size=num_patches, embed_dim = self.k)
         self.cls_token = hk.get_parameter("cls", shape=[k], init=hk.initializers.RandomNormal())
 
         self.classification= hk.Sequential([
@@ -146,8 +146,9 @@ class VisionTransformer(hk.Module):
 
         cls_token = repeat(self.cls_token, "k -> b 1 k", b=batch_size)
         combined_tokens = jnp.concatenate([cls_token, tokens], axis=1)
-
-        x = self.pos_emb + combined_tokens
+        positions = jnp.arange(combined_tokens.shape[1])
+        pos_emb = self.pos_emb(positions)
+        x = pos_emb + combined_tokens
         x = hk.dropout(hk.next_rng_key(), dropout, x)
         x = self.blocks(x)
         x = x[:, 0]
@@ -157,23 +158,11 @@ class VisionTransformer(hk.Module):
 
 
 def resize_image(example):
-    image = tf.image.resize(example["image"], [320, 320])
+    image = tf.image.resize(example["image"], [72, 72])
     label = example["label"]
     image = tf.image.per_image_standardization(image)
 
     return image, label
-
-
-def create_transformer(x):
-    return VisionTransformer(
-        k=512,
-        heads=12,
-        depth=6,
-        num_classes=10,
-        patch_size=32,
-        image_size=(320, 320),
-        dropout=0.2,
-    )(x)
 
 
 def update_metrics(step, metrics, new):
@@ -194,39 +183,51 @@ def main():
     args = parse_arguments()
     tf.config.set_visible_devices([], 'GPU')
 
-    batch_size = 64
+    batch_size = 256
     epochs = 100
-    num_classes = 10
+    num_classes = 100
     save_every = 10
     show_every = 5
 
+    def create_transformer(x):
+        return VisionTransformer(
+            k=64,
+            heads=4,
+            depth=8,
+            num_classes=num_classes,
+            patch_size=6,
+            image_size=(72, 72),
+            dropout=0.2,
+        )(x)
+
     train_ds, val_ds = tfds.load(
-        "imagenette/320px-v2",
-        split=["train", "validation"],
+        "cifar100",
+        split=["train", "test"],
         shuffle_files=True,
     )
-
     train_ds = train_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
     val_ds = val_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
     train_ds = tfds.as_numpy(train_ds)
     val_ds = tfds.as_numpy(val_ds)
 
     transformer = hk.transform(create_transformer)
     xs, _ = next(iter(train_ds))
 
-    rng = random.PRNGKey(42)
-    params = transformer.init(rng, xs)
-
-    tx = optax.adam(learning_rate=3e-4)
+    rng_seq = hk.PRNGSequence(42)
+    params = transformer.init(next(rng_seq), xs)
+    decay_steps = 10000
+    lr_scheduler = optax.cosine_decay_schedule(1e-3, decay_steps)
+    tx = optax.adam(lr_scheduler)
     opt_state = tx.init(params)
 
-    rng_seq = hk.PRNGSequence(42)
 
     @jax.jit
     def loss_fn(params, key, xs, ys):
         logits = transformer.apply(params, key, xs)
         one_hot = jax.nn.one_hot(ys, num_classes=num_classes)
-        return optax.softmax_cross_entropy(logits, one_hot).sum()
+        loss = optax.softmax_cross_entropy(logits, one_hot).mean()
+        return loss
 
     @jax.jit
     def calculate_metrics(params, key, xs, ys, k=5):

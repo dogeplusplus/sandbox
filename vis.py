@@ -67,8 +67,7 @@ class TransformerBlock(hk.Module):
     def __call__(self, x, inference=False):
         dropout = 0. if inference else self.dropout
 
-        attended = self.attention(x)
-        x = self.layer_norm_1(attended + x)
+        x = self.layer_norm_1(self.attention(x)) + x
 
         key1 = hk.next_rng_key()
         key2 = hk.next_rng_key()
@@ -158,12 +157,12 @@ def main():
     tf.config.set_visible_devices([], 'GPU')
 
     batch_size = 256
-    epochs = 500
+    epochs = 20
     num_classes = 100
     save_every = 10
     show_every = 5
-    k = 256
-    heads = 4
+    k = 64
+    heads = 12
     depth = 8
     patch_size = 6
     image_size = (72, 72)
@@ -197,9 +196,11 @@ def main():
 
     rng_seq = hk.PRNGSequence(42)
     params = transformer.init(next(rng_seq), xs)
+    param_count = sum(x.size for x in jax.tree_leaves(params))
     decay_steps = 10000
     lr_scheduler = optax.cosine_decay_schedule(1e-3, decay_steps)
     tx = optax.adam(lr_scheduler)
+    tx = optax.adam(1e-3)
     opt_state = tx.init(params)
 
 
@@ -252,6 +253,7 @@ def main():
         mlflow.log_param("patch_size", str(patch_size))
         mlflow.log_param("image_size", str(image_size))
         mlflow.log_param("dropout", dropout)
+        mlflow.log_param("num_params", param_count)
 
     for e in range(epochs):
         step = 0

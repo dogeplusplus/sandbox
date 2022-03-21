@@ -2,7 +2,6 @@ import jax
 import optax
 import pickle
 import mlflow
-import numpy as np
 import typing as t
 import haiku as hk
 import jax.numpy as jnp
@@ -11,8 +10,6 @@ import tensorflow_datasets as tfds
 
 
 from tqdm import tqdm
-from jax import random
-from functools import partial
 from argparse import ArgumentParser
 from collections import defaultdict
 from einops import rearrange, repeat
@@ -86,29 +83,6 @@ class TransformerBlock(hk.Module):
         return out
 
 
-def sinusoidal_init(shape, dtype, min_scale=0.1, max_scale=10000.):
-    seq_len, d_feature = shape[-2:]
-    pe = np.zeros((seq_len, d_feature), dtype=np.float32)
-    position = rearrange(np.arange(0, seq_len), "p -> p 1")
-    scale_factor = -np.log(max_scale / min_scale) / (d_feature // 2 - 1)
-    div_term = min_scale * np.exp(np.arange(0, d_feature // 2) * scale_factor)
-    pe[:, 0:d_feature:2] = np.sin(position * div_term)
-    pe[:, 1:d_feature:2] = np.cos(position * div_term)
-    pe = rearrange(pe, "p d -> 1 p d")
-
-    return jnp.array(pe, dtype=dtype)
-
-
-class SinPosEmb(hk.Module):
-    def __init__(self, min_scale=0.1, max_scale=10000.):
-        super().__init__()
-        self.initializer = partial(sinusoidal_init, min_scale=min_scale, max_scale=max_scale)
-
-    def __call__(self, x):
-        pos_emb = hk.get_state("pos_emb", shape=x.shape, dtype=jnp.float32, init=self.initializer)
-        return x + pos_emb
-
-
 class VisionTransformer(hk.Module):
     def __init__(self, k, heads, depth, num_classes, patch_size, image_size, dropout):
         super().__init__()
@@ -129,7 +103,7 @@ class VisionTransformer(hk.Module):
         height, width = image_size
         num_patches = (height // patch_size) * (width // patch_size) + 1
 
-        self.pos_emb = hk.Embed(vocab_size=num_patches, embed_dim = self.k)
+        self.pos_emb = hk.Embed(vocab_size=num_patches, embed_dim=self.k)
         self.cls_token = hk.get_parameter("cls", shape=[k], init=hk.initializers.RandomNormal())
 
         self.classification= hk.Sequential([
@@ -184,24 +158,31 @@ def main():
     tf.config.set_visible_devices([], 'GPU')
 
     batch_size = 256
-    epochs = 100
+    epochs = 500
     num_classes = 100
     save_every = 10
     show_every = 5
+    k = 256
+    heads = 4
+    depth = 8
+    patch_size = 6
+    image_size = (72, 72)
+    dropout = 0.2
 
     def create_transformer(x):
         return VisionTransformer(
-            k=64,
-            heads=4,
-            depth=8,
-            num_classes=num_classes,
-            patch_size=6,
-            image_size=(72, 72),
-            dropout=0.2,
+            k,
+            heads,
+            depth,
+            num_classes,
+            patch_size,
+            image_size,
+            dropout,
         )(x)
 
+    dataset_name = "cifar100"
     train_ds, val_ds = tfds.load(
-        "cifar100",
+        dataset_name,
         split=["train", "test"],
         shuffle_files=True,
     )
@@ -262,6 +243,15 @@ def main():
     if not args.debug:
         mlflow.set_experiment("cifar_haiku")
         mlflow.start_run()
+        mlflow.log_param("dataset_name", dataset_name)
+        mlflow.log_param("batch_size", batch_size)
+        mlflow.log_param("epochs", epochs)
+        mlflow.log_param("k", k)
+        mlflow.log_param("heads", heads)
+        mlflow.log_param("depth", depth)
+        mlflow.log_param("patch_size", str(patch_size))
+        mlflow.log_param("image_size", str(image_size))
+        mlflow.log_param("dropout", dropout)
 
     for e in range(epochs):
         step = 0

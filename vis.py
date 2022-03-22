@@ -148,6 +148,14 @@ def update_metrics(step, metrics, new):
 def parse_arguments():
     parser = ArgumentParser("Train Vision Transformer")
     parser.add_argument("--debug", action="store_true", default=False)
+    parser.add_argument("--batch-size", type=int, help="Batch size", default=256)
+    parser.add_argument("--epochs", type=int, help="Number of epochs", default=10)
+    parser.add_argument("--k", type=int, help="Dimension of transformer blocks", default=64)
+    parser.add_argument("--heads", type=int, help="Number of heads", default=4)
+    parser.add_argument("--patch-size", type=int, help="Patch size to cut the image into.", default=6)
+    parser.add_argument("--dropout", type=int, help="Dropout probability", default=0.1)
+    parser.add_argument("--depth", type=int, help="Number of transformer blocks", default=2)
+
     args = parser.parse_args()
     return args
 
@@ -156,27 +164,20 @@ def main():
     args = parse_arguments()
     tf.config.set_visible_devices([], 'GPU')
 
-    batch_size = 256
-    epochs = 20
     num_classes = 100
     save_every = 10
     show_every = 5
-    k = 64
-    heads = 12
-    depth = 8
-    patch_size = 6
     image_size = (72, 72)
-    dropout = 0.2
 
     def create_transformer(x):
         return VisionTransformer(
-            k,
-            heads,
-            depth,
+            args.k,
+            args.heads,
+            args.depth,
             num_classes,
-            patch_size,
+            args.patch_size,
             image_size,
-            dropout,
+            args.dropout,
         )(x)
 
     dataset_name = "cifar100"
@@ -185,8 +186,8 @@ def main():
         split=["train", "test"],
         shuffle_files=True,
     )
-    train_ds = train_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds.map(resize_image).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    train_ds = train_ds.map(resize_image).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.map(resize_image).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
 
     train_ds = tfds.as_numpy(train_ds)
     val_ds = tfds.as_numpy(val_ds)
@@ -245,17 +246,17 @@ def main():
         mlflow.set_experiment("cifar_haiku")
         mlflow.start_run()
         mlflow.log_param("dataset_name", dataset_name)
-        mlflow.log_param("batch_size", batch_size)
-        mlflow.log_param("epochs", epochs)
-        mlflow.log_param("k", k)
-        mlflow.log_param("heads", heads)
-        mlflow.log_param("depth", depth)
-        mlflow.log_param("patch_size", str(patch_size))
+        mlflow.log_param("batch_size", args.batch_size)
+        mlflow.log_param("epochs", args.epochs)
+        mlflow.log_param("k", args.k)
+        mlflow.log_param("heads", args.heads)
+        mlflow.log_param("depth", args.depth)
+        mlflow.log_param("patch_size", args.patch_size)
         mlflow.log_param("image_size", str(image_size))
-        mlflow.log_param("dropout", dropout)
+        mlflow.log_param("dropout", args.dropout)
         mlflow.log_param("num_params", param_count)
 
-    for e in range(epochs):
+    for e in range(args.epochs):
         step = 0
         metrics_dict = defaultdict(lambda: 0)
         desc = f"Train Epoch {e}"

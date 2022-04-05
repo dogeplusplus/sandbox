@@ -22,34 +22,6 @@ class ConvBNRelu(nn.Module):
         return x
 
 
-class DownSample(nn.Module):
-    out: int
-    kernel: int
-    pool_size: t.Tuple[int, int]
-    running_avg: bool = False
-
-    @nn.compact
-    def __call__(self, x):
-        x = nn.max_pool(x, self.pool_size, self.pool_size)
-        x = ConvBNRelu(self.out, self.kernel, self.running_avg)(x)
-        return x
-
-
-class UpSample(nn.Module):
-    out: int
-    kernel: int
-    factor: t.Tuple[int, int]
-    running_avg: bool = False
-
-    @nn.compact
-    def __call__(self, x):
-        B, H, W, C = x.shape
-        x = jax.image.resize(x, (B, H * self.factor[0], W * self.factor[1], C),
-                             method="bilinear")
-        x = ConvBNRelu(self.out, self.kernel, self.running_avg)(x)
-        return x
-
-
 class DilatedConvBN(nn.Module):
     out: int
     kernel: int
@@ -80,20 +52,21 @@ class RSUBlock(nn.Module):
     m: int
     running_avg: bool = False
     dilation: int = 2
+    factor: int = 2
 
     @nn.compact
     def __call__(self, x):
-        down_levels = [ConvBNRelu(self.m, self.kernel)] + [
-            DownSample(self.m, self.kernel, (2, 2))
-            for _ in range(self.levels - 2)
+        down_levels = [
+            ConvBNRelu(self.m, self.kernel)
+            for _ in range(self.levels - 1)
         ]
 
         bottom = ConvBNRelu(self.m, self.kernel, self.running_avg, self.dilation)
 
-        up_levels = [ConvBNRelu(self.m, self.kernel)] + [
-            UpSample(self.m, self.kernel, (2, 2))
-            for _ in range(self.levels - 2)
-        ] + [UpSample(self.out_features, self.kernel, (2, 2))]
+        up_levels = [
+            ConvBNRelu(self.m, self.kernel)
+            for _ in range(self.levels - 1)
+        ] + [ConvBNRelu(self.out_features, self.kernel)]
 
 
         top_left = ConvBNRelu(self.out_features, self.kernel, self.running_avg)(x)
@@ -103,12 +76,15 @@ class RSUBlock(nn.Module):
         for layer in down_levels:
             x = layer(x)
             down_stack.insert(0, x)
+            x = nn.max_pool(x, (2, 2), (2, 2))
 
         x = bottom(x)
 
-        for down, layer in enumerate(up_levels):
-            x = jnp.concatenate([down, x], axis=1)
+        for down, layer in zip(down_stack, up_levels):
+            x = jnp.concatenate([down, x], axis=-1)
             x = layer(x)
+            B, H, W, C = x.shape
+            x = jax.image.resize(x, (B, H * 2, W * 2, C), method="bilinear")
 
         out = top_left + x
 
@@ -134,10 +110,10 @@ class DilationRSUBlock(nn.Module):
 
         b = ConvBNRelu(self.m, self.kernel, dilation=8)(d4)
 
-        u4 = ConvBNRelu(self.m, self.kernel, self.running_avg, dilation=4)(jnp.concatenate([d4, b], axis=1))
-        u3 = ConvBNRelu(self.m, self.kernel, self.running_avg, dilation=4)(jnp.concatenate([d3, u4], axis=1))
-        u2 = ConvBNRelu(self.m, self.kernel, self.running_avg, dilation=2)(jnp.concatenate([d2, u3], axis=1))
-        u1 = ConvBNRelu(self.m, self.kernel, self.running_avg)(jnp.concatenate([d1, u2], axis=1))
+        u4 = ConvBNRelu(self.m, self.kernel, self.running_avg, dilation=4)(jnp.concatenate([d4, b], axis=-1))
+        u3 = ConvBNRelu(self.m, self.kernel, self.running_avg, dilation=4)(jnp.concatenate([d3, u4], axis=-1))
+        u2 = ConvBNRelu(self.m, self.kernel, self.running_avg, dilation=2)(jnp.concatenate([d2, u3], axis=-1))
+        u1 = ConvBNRelu(self.m, self.kernel, self.running_avg)(jnp.concatenate([d1, u2], axis=-1))
 
         out = top_left + u1
         return out
@@ -147,60 +123,29 @@ def test_conv_block():
     out = 5
     kernel = (3,3)
 
-    x = jnp.ones((4, 256, 256, 3))
+    x = jnp.ones((4, 128, 128, 3))
     layer = ConvBNRelu(out, kernel)
     key = random.PRNGKey(0)
     params = layer.init(key, x)
 
     y, mutated_vars = layer.apply(params, x, mutable=["batch_stats"])
 
-    assert y.shape == (4, 256, 256, out)
+    assert y.shape == (4, 128, 128, out)
     assert "batch_stats" in mutated_vars.keys()
 
 
-def test_downsample():
-    out = 3
-    kernel = (3,3)
-    pool_size = (2, 2)
-
-    x = jnp.ones((4, 256, 256, 3))
-    layer = DownSample(out, kernel, pool_size)
-    key = random.PRNGKey(0)
-    params = layer.init(key, x)
-
-    y, _ = layer.apply(params, x, mutable=["batch_stats"])
-
-    assert y.shape == (4, 128, 128, out)
-
-
-def test_upsample():
-    out = 3
-    kernel = (3,3)
-    factor = (2, 2)
-
-    x = jnp.ones((4, 256, 256, 3))
-    layer = UpSample(out, kernel, factor)
-    key = random.PRNGKey(0)
-    params = layer.init(key, x)
-
-    y, _ = layer.apply(params, x, mutable=["batch_stats"])
-
-    assert y.shape == (4, 512, 512, out)
-
-
-@pytest.mark.skip(reason="testing")
 def test_rsu_block():
-    levels = 3
+    levels = 4
     in_features = 3
     out_features= 5
     kernel = (3,3)
     m = 16
 
-    x = jnp.ones((4, 256, 256, 3))
+    x = jnp.ones((4, 128, 128, 3))
     block = RSUBlock(levels, in_features, out_features, kernel, m)
     key = random.PRNGKey(0)
-    params = block.init(key, x)
+    params, _ = block.init(key, x)
 
-    y = block.apply(params, x)
+    y = block.apply(params, x, mutable=["batch_stats"])
 
-    assert y.shape == x.shape
+    assert y.shape == (4, 128, 128, out_features)

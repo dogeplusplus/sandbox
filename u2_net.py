@@ -58,7 +58,7 @@ class RSUBlock(nn.Module):
     def __call__(self, x):
         down_levels = [
             ConvBNRelu(self.m, self.kernel)
-            for _ in range(self.levels - 1)
+            for _ in range(self.levels-1)
         ]
 
         bottom = ConvBNRelu(self.m, self.kernel, self.running_avg, self.dilation)
@@ -66,7 +66,7 @@ class RSUBlock(nn.Module):
         up_levels = [
             ConvBNRelu(self.m, self.kernel)
             for _ in range(self.levels - 1)
-        ] + [ConvBNRelu(self.out_features, self.kernel)]
+        ]
 
 
         top_left = ConvBNRelu(self.out_features, self.kernel, self.running_avg)(x)
@@ -78,6 +78,9 @@ class RSUBlock(nn.Module):
             down_stack.insert(0, x)
             x = nn.max_pool(x, (2, 2), (2, 2))
 
+        # Insert another convolution without the pooling at the bottom
+        down_stack.insert(0, ConvBNRelu(self.m, self.kernel, self.running_avg)(x))
+
         x = bottom(x)
 
         for down, layer in zip(down_stack, up_levels):
@@ -86,6 +89,7 @@ class RSUBlock(nn.Module):
             B, H, W, C = x.shape
             x = jax.image.resize(x, (B, H * 2, W * 2, C), method="bilinear")
 
+        x = ConvBNRelu(self.out_features, self.kernel, self.running_avg)(x)
         out = top_left + x
 
         return out
@@ -135,7 +139,7 @@ def test_conv_block():
 
 
 def test_rsu_block():
-    levels = 4
+    levels = 2
     in_features = 3
     out_features= 5
     kernel = (3,3)
@@ -144,8 +148,8 @@ def test_rsu_block():
     x = jnp.ones((4, 128, 128, 3))
     block = RSUBlock(levels, in_features, out_features, kernel, m)
     key = random.PRNGKey(0)
-    params, _ = block.init(key, x)
+    params = block.init(key, x)
 
-    y = block.apply(params, x, mutable=["batch_stats"])
+    y, _ = block.apply(params, x, mutable=["batch_stats"])
 
     assert y.shape == (4, 128, 128, out_features)

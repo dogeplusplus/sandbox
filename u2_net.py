@@ -136,7 +136,6 @@ class U2Net(nn.Module):
         x = nn.max_pool(en4, (2, 2), (2, 2))
 
         en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
-        x = nn.max_pool(en5, (2, 2), (2, 2))
 
         en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
         sup6 = SideSaliency((B, H, W, C))(en6)
@@ -146,22 +145,22 @@ class U2Net(nn.Module):
         de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
         sup5 = SideSaliency((B, H, W, C))(de5)
 
-        x = jnp.concatenate([de5, en5], axis=-1)
+        x = jnp.concatenate([de5, en4], axis=-1)
         x = upsample(x, 2)
         de4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim)(x)
         sup4 = SideSaliency((B, H, W, C))(de4)
 
-        x = jnp.concatenate([de4, en4], axis=-1)
+        x = jnp.concatenate([de4, en3], axis=-1)
         x = upsample(x, 2)
         de3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim)(x)
         sup3 = SideSaliency((B, H, W, C))(de3)
 
-        x = jnp.concatenate([de3, en3], axis=-1)
+        x = jnp.concatenate([de3, en2], axis=-1)
         x = upsample(x, 2)
         de2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim)(x)
         sup2 = SideSaliency((B, H, W, C))(de2)
 
-        x = jnp.concatenate([de2, en2], axis=-1)
+        x = jnp.concatenate([de2, en1], axis=-1)
         x = upsample(x, 2)
         de1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim)(x)
         sup1 = SideSaliency((B, H, W, C))(de1)
@@ -218,8 +217,24 @@ def test_dilation_rsu_block():
 
     assert y.shape == (4, 32, 32, out_dim)
 
+
 def test_upsample():
     x = jnp.ones((2, 32, 32, 3))
     y = upsample(x, 2)
 
     assert y.shape == (2, 64, 64, 3)
+
+
+def test_u2_net():
+    mid_dim = 16
+    out_dim = 64
+    kernel = (3, 3)
+
+    x = jnp.ones((4, 256, 256, 3))
+    model = U2Net(mid_dim, out_dim, kernel)
+    key = random.PRNGKey(0)
+    params = model.init(key, x)
+
+    y, _ = model.apply(params, x, mutable=["batch_stats"])
+    assert y.shape == (4, 256, 256, 1)
+

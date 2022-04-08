@@ -1,11 +1,17 @@
+import os
 import jax
-import pytest
+import cv2
+import optax
 import typing as t
 import jax.numpy as jnp
 import flax.linen as nn
 
+from tqdm import tqdm
 from jax import random
-
+from collections import defaultdict
+from flax.core.frozen_dict import FrozenDict
+from jaxlib.xla_extension import DeviceArray
+from torchdata.datapipes.iter import IterDataPipe
 
 def upsample(x: jnp.ndarray, factor: int) -> jnp.ndarray:
     B, H, W, C = x.shape
@@ -237,4 +243,94 @@ def test_u2_net():
 
     y, _ = model.apply(params, x, mutable=["batch_stats"])
     assert y.shape == (4, 256, 256, 1)
+
+
+class DUTS(IterDataPipe):
+    def __init__(self, images_path: str, labels_path: str):
+        self.images_path = images_path
+        self.labels_path = labels_path
+        self.image_names = list(os.listdir(images_path))
+
+    def __len__(self):
+        return len(self.image_names)
+
+    def __iter__(self):
+        for name in self.image_names:
+            img_path = os.path.join(self.images_path, name)
+            label_path = os.path.join(self.labels_path, name).replace(".jpg", ".png")
+
+            img = cv2.imread(img_path)
+            label = cv2.imread(label_path)
+
+            img = cv2.resize(img, (320, 320))
+            label= cv2.resize(label, (320, 320))
+
+            yield jnp.array(img), jnp.array(label)
+
+
+def collate_fn(batch: t.List[t.Any]) -> t.Tuple[jnp.ndarray, jnp.ndarray]:
+    xs, ys = zip(*batch)
+    return jnp.array(xs), jnp.array(ys)
+
+
+if __name__ == "__main__":
+    img_dir = os.path.join("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
+    label_dir = os.path.join("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
+
+    batch_size = 16
+    ds = DUTS(img_dir, label_dir)
+    ds = ds.batch(batch_size)
+    ds = ds.collate(collate_fn)
+
+    epochs = 100
+    mid_dim = 16
+    out_dim = 64
+    kernel = (3, 3)
+
+    x = jnp.zeros((2, 320, 320, 3))
+    model = U2Net(mid_dim, out_dim, kernel)
+    key = random.PRNGKey(0)
+    params = model.init(key, x)
+
+    tx = optax.adam(1e-3)
+    opt_state = tx.init(params)
+
+    @jax.jit
+    def loss_fn(
+        params: FrozenDict,
+        xs: jnp.ndarray,
+        ys: jnp.ndarray
+    ) -> jnp.ndarray:
+        logits, _ = model.apply(params, xs, mutable=["batch_stats"])
+        loss = optax.sigmoid_binary_cross_entropy(logits, ys).mean()
+
+        return loss
+
+    @jax.jit
+    def update(
+        params: FrozenDict,
+        opt_state: optax.OptState,
+        xs: jnp.ndarray,
+        ys: jnp.ndarray,
+    ) -> t.Tuple[FrozenDict, optax.OptState, jnp.ndarray]:
+        loss, grads = jax.value_and_grad(loss_fn)(params, xs, ys)
+        updates, opt_state = tx.update(grads, opt_state)
+        new_params = optax.apply_updates(params, updates)
+
+        return new_params, opt_state, loss
+
+
+    for e in range(epochs):
+        step = 0
+        metrics_dict = defaultdict(lambda: 0)
+        desc = f"Train Epoch {e}"
+        train_bar = tqdm(ds, total=len(ds), ncols=0, desc=desc)
+
+        for xs, ys in train_bar:
+            params, opt_state, loss = update(params, opt_state, xs, ys)
+            metrics_dict["loss"] *= step
+            metrics_dict["loss"] += loss
+
+            train_bar.set_postfix(**metrics_dict)
+            step += 1
 

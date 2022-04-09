@@ -3,6 +3,7 @@ import jax
 import cv2
 import optax
 import typing as t
+import jax.profiler
 import jax.numpy as jnp
 import flax.linen as nn
 
@@ -144,38 +145,38 @@ class U2Net(nn.Module):
         en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
 
         en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
-        sup6 = SideSaliency((B, H, W, C))(en6)
+        sup6 = SideSaliency((B, H, W, 1))(en6)
 
         x = jnp.concatenate([en5, en6], axis=-1)
         x = upsample(x, 2)
         de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
-        sup5 = SideSaliency((B, H, W, C))(de5)
+        sup5 = SideSaliency((B, H, W, 1))(de5)
 
         x = jnp.concatenate([de5, en4], axis=-1)
         x = upsample(x, 2)
         de4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim)(x)
-        sup4 = SideSaliency((B, H, W, C))(de4)
+        sup4 = SideSaliency((B, H, W, 1))(de4)
 
         x = jnp.concatenate([de4, en3], axis=-1)
         x = upsample(x, 2)
         de3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim)(x)
-        sup3 = SideSaliency((B, H, W, C))(de3)
+        sup3 = SideSaliency((B, H, W, 1))(de3)
 
         x = jnp.concatenate([de3, en2], axis=-1)
         x = upsample(x, 2)
         de2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim)(x)
-        sup2 = SideSaliency((B, H, W, C))(de2)
+        sup2 = SideSaliency((B, H, W, 1))(de2)
 
         x = jnp.concatenate([de2, en1], axis=-1)
         x = upsample(x, 2)
         de1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim)(x)
-        sup1 = SideSaliency((B, H, W, C))(de1)
+        sup1 = SideSaliency((B, H, W, 1))(de1)
 
         fused = jnp.concatenate([sup1, sup2, sup3, sup4, sup5, sup6], axis=-1)
         fused = nn.Conv(1, (1, 1))(fused)
         out = jax.nn.sigmoid(fused)
 
-        return out
+        return out, (sup1, sup2, sup3, sup4, sup5, sup6)
 
 
 def test_conv_block():
@@ -241,8 +242,12 @@ def test_u2_net():
     key = random.PRNGKey(0)
     params = model.init(key, x)
 
-    y, _ = model.apply(params, x, mutable=["batch_stats"])
-    assert y.shape == (4, 256, 256, 1)
+    output, _ = model.apply(params, x, mutable=["batch_stats"])
+    final_prediction, saliency_maps = output
+    assert final_prediction.shape == (4, 256, 256, 1)
+
+    for sm in saliency_maps:
+        assert sm.shape == (4, 256, 256, 1)
 
 
 class DUTS(IterDataPipe):
@@ -277,12 +282,12 @@ if __name__ == "__main__":
     img_dir = os.path.join("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
     label_dir = os.path.join("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
 
-    batch_size = 16
+    batch_size = 8
     ds = DUTS(img_dir, label_dir)
     ds = ds.batch(batch_size)
     ds = ds.collate(collate_fn)
 
-    epochs = 100
+    epochs = 1
     mid_dim = 16
     out_dim = 64
     kernel = (3, 3)
@@ -319,7 +324,6 @@ if __name__ == "__main__":
 
         return new_params, opt_state, loss
 
-
     for e in range(epochs):
         step = 0
         metrics_dict = defaultdict(lambda: 0)
@@ -333,4 +337,3 @@ if __name__ == "__main__":
 
             train_bar.set_postfix(**metrics_dict)
             step += 1
-

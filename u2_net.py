@@ -242,12 +242,23 @@ def test_u2_net():
     key = random.PRNGKey(0)
     params = model.init(key, x)
 
-    output, _ = model.apply(params, x, mutable=["batch_stats"])
-    final_prediction, saliency_maps = output
-    assert final_prediction.shape == (4, 256, 256, 1)
+    saliency_maps, _ = model.apply(params, x, mutable=["batch_stats"])
+    assert saliency_maps.shape == (4, 256, 256, 7)
+    assert jnp.max(saliency_maps) <= 1
+    assert jnp.min(saliency_maps) >= 0
 
-    for sm in saliency_maps:
-        assert sm.shape == (4, 256, 256, 1)
+
+def test_saliency_map():
+    target_shape = (3, 64, 64, 3)
+    x = jnp.ones((3, 8, 8, 3))
+
+    layer = SideSaliency(target_shape)
+    key = random.PRNGKey(0)
+    params = layer.init(key, x)
+    saliency_map = layer.apply(params, x)
+    assert saliency_map.shape == target_shape
+    assert jnp.max(saliency_map) <= 1
+    assert jnp.min(saliency_map) >= 0
 
 
 class DUTS(IterDataPipe):

@@ -7,11 +7,11 @@ import jax.profiler
 import jax.numpy as jnp
 import flax.linen as nn
 
+from einops import repeat
 from tqdm import tqdm
 from jax import random
 from collections import defaultdict
 from flax.core.frozen_dict import FrozenDict
-from jaxlib.xla_extension import DeviceArray
 from torchdata.datapipes.iter import IterDataPipe
 
 def upsample(x: jnp.ndarray, factor: int) -> jnp.ndarray:
@@ -128,7 +128,7 @@ class U2Net(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        B, H, W, C = x.shape
+        B, H, W, _ = x.shape
 
         en1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim)(x)
         x = nn.max_pool(en1, (2, 2), (2, 2))
@@ -176,7 +176,7 @@ class U2Net(nn.Module):
         fused = nn.Conv(1, (1, 1))(fused)
         out = jax.nn.sigmoid(fused)
 
-        return out, (sup1, sup2, sup3, sup4, sup5, sup6)
+        return jnp.concatenate([out, sup1, sup2, sup3, sup4, sup5, sup6], axis=-1)
 
 
 def test_conv_block():
@@ -265,12 +265,13 @@ class DUTS(IterDataPipe):
             label_path = os.path.join(self.labels_path, name).replace(".jpg", ".png")
 
             img = cv2.imread(img_path)
-            label = cv2.imread(label_path)
+            label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
 
             img = cv2.resize(img, (320, 320))
             label= cv2.resize(label, (320, 320))
+            label = repeat(label, "h w -> h w 1")
 
-            yield jnp.array(img), jnp.array(label)
+            yield jnp.array(img) / 255., jnp.array(label) / 255.
 
 
 def collate_fn(batch: t.List[t.Any]) -> t.Tuple[jnp.ndarray, jnp.ndarray]:
@@ -304,12 +305,15 @@ if __name__ == "__main__":
     def loss_fn(
         params: FrozenDict,
         xs: jnp.ndarray,
-        ys: jnp.ndarray
+        ys: jnp.ndarray,
+        weights: jnp.ndarray = jnp.ones(7),
     ) -> jnp.ndarray:
-        logits, _ = model.apply(params, xs, mutable=["batch_stats"])
-        loss = optax.sigmoid_binary_cross_entropy(logits, ys).mean()
+        saliency_maps, _ = model.apply(params, xs, mutable=["batch_stats"])
+        ys = repeat(ys, "b h w 1 -> b h w x", x=len(weights))
+        losses = optax.sigmoid_binary_cross_entropy(saliency_maps, ys)
+        total_loss = jnp.mean(weights * losses)
 
-        return loss
+        return total_loss
 
     @jax.jit
     def update(
@@ -329,11 +333,9 @@ if __name__ == "__main__":
         metrics_dict = defaultdict(lambda: 0)
         desc = f"Train Epoch {e}"
         train_bar = tqdm(ds, total=len(ds), ncols=0, desc=desc)
-
         for xs, ys in train_bar:
             params, opt_state, loss = update(params, opt_state, xs, ys)
-            metrics_dict["loss"] *= step
-            metrics_dict["loss"] += loss
+            metrics_dict["loss"] = (step * metrics_dict["loss"] + loss) / (step + 1)
 
             train_bar.set_postfix(**metrics_dict)
             step += 1

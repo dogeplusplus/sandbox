@@ -1,18 +1,17 @@
-import os
 import jax
-import cv2
 import optax
 import typing as t
-import jax.profiler
 import jax.numpy as jnp
 import flax.linen as nn
+import tensorflow as tf
 
+from pathlib import Path
 from einops import repeat
 from tqdm import tqdm
 from jax import random
 from collections import defaultdict
 from flax.core.frozen_dict import FrozenDict
-from torchdata.datapipes.iter import IterDataPipe
+
 
 def upsample(x: jnp.ndarray, factor: int) -> jnp.ndarray:
     B, H, W, C = x.shape
@@ -261,43 +260,48 @@ def test_saliency_map():
     assert jnp.min(saliency_map) >= 0
 
 
-class DUTS(IterDataPipe):
-    def __init__(self, images_path: str, labels_path: str):
-        self.images_path = images_path
-        self.labels_path = labels_path
-        self.image_names = list(os.listdir(images_path))
-
-    def __len__(self):
-        return len(self.image_names)
-
-    def __iter__(self):
-        for name in self.image_names:
-            img_path = os.path.join(self.images_path, name)
-            label_path = os.path.join(self.labels_path, name).replace(".jpg", ".png")
-
-            img = cv2.imread(img_path)
-            label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
-
-            img = cv2.resize(img, (320, 320))
-            label= cv2.resize(label, (320, 320))
-            label = repeat(label, "h w -> h w 1")
-
-            yield jnp.array(img) / 255., jnp.array(label) / 255.
+def normalize_image(img, a=-1, b=1):
+    lower = tf.reduce_min(img)
+    upper = tf.reduce_max(img)
+    img = (img - lower) / (upper - lower)
+    img = a + (b - a) * img
+    return img
 
 
-def collate_fn(batch: t.List[t.Any]) -> t.Tuple[jnp.ndarray, jnp.ndarray]:
-    xs, ys = zip(*batch)
-    return jnp.array(xs), jnp.array(ys)
+def parse_image(filename):
+    image = tf.io.read_file(filename)
+    image = tf.io.decode_image(image, expand_animations=False)
+    image = tf.image.convert_image_dtype(image, tf.float32)
+    image = tf.image.resize(image, [320, 320])
+    return image
+
+
+def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int):
+    images = tf.data.Dataset.list_files(str(img_dir / "*"))
+    labels = images.map(lambda x: tf.strings.regex_replace(x, str(img_dir), str(label_dir)))
+
+
+    images = images.map(parse_image)
+    images = images.map(lambda x: normalize_image(x, -1, 1))
+
+    labels = labels.map(lambda x: tf.strings.regex_replace(x, ".jpg", ".png"))
+    labels = labels.map(parse_image)
+    labels = labels.map(lambda x: normalize_image(x, 0, 1))
+
+    ds = tf.data.Dataset.zip((images, labels))
+    ds = ds.batch(batch_size)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+
+    return ds
 
 
 if __name__ == "__main__":
-    img_dir = os.path.join("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
-    label_dir = os.path.join("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
+    img_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
+    label_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
 
     batch_size = 8
-    ds = DUTS(img_dir, label_dir)
-    ds = ds.batch(batch_size)
-    ds = ds.collate(collate_fn)
+    tf.config.set_visible_devices([], "GPU")
+    ds = duts_dataset(img_dir, label_dir, batch_size)
 
     epochs = 1
     mid_dim = 16
@@ -345,6 +349,9 @@ if __name__ == "__main__":
         desc = f"Train Epoch {e}"
         train_bar = tqdm(ds, total=len(ds), ncols=0, desc=desc)
         for xs, ys in train_bar:
+            xs = jnp.asarray(xs)
+            ys = jnp.asarray(ys)
+
             params, opt_state, loss = update(params, opt_state, xs, ys)
             metrics_dict["loss"] = (step * metrics_dict["loss"] + loss) / (step + 1)
 

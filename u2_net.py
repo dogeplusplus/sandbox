@@ -268,15 +268,15 @@ def normalize_image(img, a=-1, b=1):
     return img
 
 
-def parse_image(filename):
+def parse_image(filename, channels=3):
     image = tf.io.read_file(filename)
-    image = tf.io.decode_image(image, expand_animations=False)
+    image = tf.io.decode_image(image, channels, expand_animations=False)
     image = tf.image.convert_image_dtype(image, tf.float32)
     image = tf.image.resize(image, [320, 320])
     return image
 
 
-def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int):
+def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: float = 0.2):
     images = tf.data.Dataset.list_files(str(img_dir / "*"))
     labels = images.map(lambda x: tf.strings.regex_replace(x, str(img_dir), str(label_dir)))
 
@@ -285,23 +285,32 @@ def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int):
     images = images.map(lambda x: normalize_image(x, -1, 1))
 
     labels = labels.map(lambda x: tf.strings.regex_replace(x, ".jpg", ".png"))
-    labels = labels.map(parse_image)
+    labels = labels.map(lambda x: parse_image(x, 1))
     labels = labels.map(lambda x: normalize_image(x, 0, 1))
 
     ds = tf.data.Dataset.zip((images, labels))
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
+    size = len(ds)
+    val_size = int(size * val_ratio)
 
-    return ds
+    val_ds = ds.take(val_size)
+    train_ds = ds.skip(val_size)
+
+    train_ds = train_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    return train_ds, val_ds
 
 
 if __name__ == "__main__":
     img_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
     label_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
 
-    batch_size = 8
     tf.config.set_visible_devices([], "GPU")
-    ds = duts_dataset(img_dir, label_dir, batch_size)
+    writer = tf.summary.create_file_writer("logs")
+
+    samples = 8
+    batch_size = 16
+    train_ds, val_ds = duts_dataset(img_dir, label_dir, batch_size)
 
     epochs = 1
     mid_dim = 16
@@ -347,7 +356,7 @@ if __name__ == "__main__":
         step = 0
         metrics_dict = defaultdict(lambda: 0)
         desc = f"Train Epoch {e}"
-        train_bar = tqdm(ds, total=len(ds), ncols=0, desc=desc)
+        train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=desc)
         for xs, ys in train_bar:
             xs = jnp.asarray(xs)
             ys = jnp.asarray(ys)
@@ -357,3 +366,4 @@ if __name__ == "__main__":
 
             train_bar.set_postfix(**metrics_dict)
             step += 1
+

@@ -372,9 +372,6 @@ if __name__ == "__main__":
     val_jax_img = jnp.asarray(sample_val_img)
     val_jax_lab = jnp.asarray(sample_val_lab)
 
-    pred_train = inference_model.apply(params, train_jax_img)
-    pred_val = inference_model.apply(params, val_jax_img)
-
     for e in range(epochs):
         train_step = 0
         val_step = 0
@@ -414,7 +411,7 @@ if __name__ == "__main__":
                 tf.summary.image("predictions", pred_train, step=e, max_outputs=8)
 
             with valid_writer.as_default():
-                pred_train = inference_model.apply(params, val_jax_img)[..., [0]]
+                pred_val = inference_model.apply(params, val_jax_img)[..., [0]]
                 tf.summary.image("predictions", pred_val, step=e, max_outputs=8)
 
         train_writer.flush()

@@ -277,7 +277,7 @@ def parse_image(filename, channels=3):
     return image
 
 
-def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: float = 0.2):
+def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: float = 0.2, shuffle_buffer: int = 8):
     images = tf.data.Dataset.list_files(str(img_dir / "*"), shuffle=False)
     labels = images.map(lambda x: tf.strings.regex_replace(x, str(img_dir), str(label_dir)))
 
@@ -295,8 +295,8 @@ def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: flo
     val_ds = ds.take(val_size)
     train_ds = ds.skip(val_size)
 
-    train_ds = train_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    train_ds = train_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     return train_ds, val_ds
 
@@ -306,11 +306,13 @@ if __name__ == "__main__":
     label_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
 
     tf.config.set_visible_devices([], "GPU")
-    writer = tf.summary.create_file_writer("logs")
+    train_writer = tf.summary.create_file_writer("logs/train")
+    valid_writer = tf.summary.create_file_writer("logs/valid")
 
     batch_size = 16
     train_ds, val_ds = duts_dataset(img_dir, label_dir, batch_size)
-    sample_images, sample_labels = next(iter(val_ds))
+    sample_train_img, sample_train_lab = next(iter(train_ds))
+    sample_val_img, sample_val_lab = next(iter(val_ds))
 
     epochs = 1
     mid_dim = 16
@@ -355,48 +357,66 @@ if __name__ == "__main__":
 
         return new_params, opt_state, loss
 
-    with writer.as_default():
 
-        tf.summary.image("images", sample_images, step=0)
-        tf.summary.image("labels", sample_labels, step=0)
+    with train_writer.as_default():
+        tf.summary.image("images", sample_train_img, step=0, max_outputs=8)
+        tf.summary.image("labels", sample_train_lab, step=0, max_outputs=8)
 
-        sample_images_jax = jnp.asarray(sample_images)
-        sample_labels_jax = jnp.asarray(sample_labels)
+    with valid_writer.as_default():
+        tf.summary.image("images", sample_val_img, step=0, max_outputs=8)
+        tf.summary.image("labels", sample_val_lab, step=0, max_outputs=8)
 
-        sample_predictions = inference_model.apply(params, sample_images)
-        for e in range(epochs):
-            train_step = 0
-            val_step = 0
-            metrics_dict = defaultdict(lambda: 0)
-            train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=f"Train Epoch {e}")
 
-            for xs, ys in train_bar:
-                xs = jnp.asarray(xs)
-                ys = jnp.asarray(ys)
+    train_jax_img = jnp.asarray(sample_train_img)
+    train_jax_lab = jnp.asarray(sample_train_lab)
+    val_jax_img = jnp.asarray(sample_val_img)
+    val_jax_lab = jnp.asarray(sample_val_lab)
 
-                params, opt_state, loss = update(params, opt_state, xs, ys)
-                metrics_dict["train_loss"] = (train_step * metrics_dict["train_loss"] + loss) / (train_step + 1)
+    pred_train = inference_model.apply(params, train_jax_img)
+    pred_val = inference_model.apply(params, val_jax_img)
 
-                train_bar.set_postfix(**metrics_dict)
-                train_step += 1
+    for e in range(epochs):
+        train_step = 0
+        val_step = 0
+        metrics_dict = defaultdict(lambda: 0)
+        train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=f"Train Epoch {e}")
 
-            val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=f"Valid Epoch {e}")
-            for xs, ys in val_bar:
-                xs = jnp.asarray(xs)
-                ys = jnp.asarray(ys)
+        for xs, ys in train_bar:
+            xs = jnp.asarray(xs)
+            ys = jnp.asarray(ys)
 
-                loss = loss_fn(params, xs, ys)
-                metrics_dict["val_loss"] = (val_step * metrics_dict["val_loss"] + loss) / (val_step + 1)
+            params, opt_state, loss = update(params, opt_state, xs, ys)
+            metrics_dict["train_loss"] = (train_step * metrics_dict["train_loss"] + loss) / (train_step + 1)
 
-                val_bar.set_postfix(**metrics_dict)
-                val_step += 1
+            train_bar.set_postfix(**metrics_dict)
+            train_step += 1
 
-            tf.summary.scalar("train_loss", metrics_dict["train_loss"], step=e)
-            tf.summary.scalar("val_loss", metrics_dict["val_loss"], step=e)
+        val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=f"Valid Epoch {e}")
+        for xs, ys in val_bar:
+            xs = jnp.asarray(xs)
+            ys = jnp.asarray(ys)
 
-            writer.flush()
+            loss = loss_fn(params, xs, ys)
+            metrics_dict["val_loss"] = (val_step * metrics_dict["val_loss"] + loss) / (val_step + 1)
 
-            if e % log_every == 0:
-                sample_predictions = inference_model.apply(params, sample_images_jax)[..., 0]
-                tf.summary.image("predictions", sample_predictions, step=e)
+            val_bar.set_postfix(**metrics_dict)
+            val_step += 1
+
+        with train_writer.as_default():
+            tf.summary.scalar("loss", metrics_dict["train_loss"], step=e)
+        with valid_writer.as_default():
+            tf.summary.scalar("loss", metrics_dict["val_loss"], step=e)
+
+
+        if e % log_every == 0:
+            with train_writer.as_default():
+                pred_train = inference_model.apply(params, train_jax_img)[..., [0]]
+                tf.summary.image("predictions", pred_train, step=e, max_outputs=8)
+
+            with valid_writer.as_default():
+                pred_train = inference_model.apply(params, val_jax_img)[..., [0]]
+                tf.summary.image("predictions", pred_val, step=e, max_outputs=8)
+
+        train_writer.flush()
+        valid_writer.flush()
 

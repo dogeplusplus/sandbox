@@ -22,13 +22,13 @@ def upsample(x: jnp.ndarray, factor: int) -> jnp.ndarray:
 class ConvBNRelu(nn.Module):
     out: int
     kernel: int
-    running_avg: bool = False
+    inference: bool = False
     dilation: int = 1
 
     @nn.compact
     def __call__(self, x):
         x = nn.Conv(self.out, self.kernel, kernel_dilation=self.dilation)(x)
-        x = nn.BatchNorm(use_running_average=self.running_avg)(x)
+        x = nn.BatchNorm(use_running_average=self.inference)(x)
         x = nn.relu(x)
 
         return x
@@ -39,23 +39,23 @@ class RSUBlock(nn.Module):
     out_dim: int
     kernel: int
     mid_dim: int
-    running_avg: bool = False
+    inference: bool = False
 
     @nn.compact
     def __call__(self, x):
         down_levels = [
-            ConvBNRelu(self.mid_dim, self.kernel, self.running_avg)
+            ConvBNRelu(self.mid_dim, self.kernel, self.inference)
             for _ in range(self.levels-1)
         ]
 
 
         up_levels = [
-            ConvBNRelu(self.mid_dim, self.kernel, self.running_avg)
+            ConvBNRelu(self.mid_dim, self.kernel, self.inference)
             for _ in range(self.levels - 1)
         ]
 
 
-        top_left = ConvBNRelu(self.out_dim, self.kernel, self.running_avg)(x)
+        top_left = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
 
         x = top_left
         down_stack = []
@@ -65,9 +65,9 @@ class RSUBlock(nn.Module):
             x = nn.max_pool(x, (2, 2), (2, 2))
 
         # Insert another convolution without the pooling at the bottom
-        down_stack.insert(0, ConvBNRelu(self.mid_dim, self.kernel, self.running_avg)(x))
+        down_stack.insert(0, ConvBNRelu(self.mid_dim, self.kernel, self.inference)(x))
 
-        x = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg, 2)(x)
+        x = ConvBNRelu(self.mid_dim, self.kernel, self.inference, 2)(x)
 
         for down, layer in zip(down_stack, up_levels):
             x = jnp.concatenate([down, x], axis=-1)
@@ -75,7 +75,7 @@ class RSUBlock(nn.Module):
             x = upsample(x, 2)
 
         # Final convolution at the top right before concatenation
-        x = ConvBNRelu(self.out_dim, self.kernel, self.running_avg)(x)
+        x = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
         out = top_left + x
 
         return out
@@ -85,24 +85,24 @@ class DilationRSUBlock(nn.Module):
     out_dim: int
     kernel: int
     mid_dim: int
-    running_avg: bool = False
+    inference: bool = False
 
     @nn.compact
     def __call__(self, x):
-        top_left = ConvBNRelu(self.out_dim, self.kernel)(x)
+        top_left = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
 
         x = top_left
-        d1 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg)(x)
-        d2 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg)(d1)
-        d3 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg, dilation=2)(d2)
-        d4 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg, dilation=4)(d3)
+        d1 = ConvBNRelu(self.mid_dim, self.kernel, self.inference)(x)
+        d2 = ConvBNRelu(self.mid_dim, self.kernel, self.inference)(d1)
+        d3 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=2)(d2)
+        d4 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(d3)
 
-        b = ConvBNRelu(self.mid_dim, self.kernel, dilation=8)(d4)
+        b = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=8)(d4)
 
-        u4 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg, dilation=4)(jnp.concatenate([d4, b], axis=-1))
-        u3 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg, dilation=4)(jnp.concatenate([d3, u4], axis=-1))
-        u2 = ConvBNRelu(self.mid_dim, self.kernel, self.running_avg, dilation=2)(jnp.concatenate([d2, u3], axis=-1))
-        u1 = ConvBNRelu(self.out_dim, self.kernel, self.running_avg)(jnp.concatenate([d1, u2], axis=-1))
+        u4 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(jnp.concatenate([d4, b], axis=-1))
+        u3 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(jnp.concatenate([d3, u4], axis=-1))
+        u2 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=2)(jnp.concatenate([d2, u3], axis=-1))
+        u1 = ConvBNRelu(self.out_dim, self.kernel, self.inference)(jnp.concatenate([d1, u2], axis=-1))
 
         out = top_left + u1
         return out
@@ -124,51 +124,52 @@ class U2Net(nn.Module):
     mid_dim: int = 16
     out_dim: int = 64
     kernel: t.Tuple[int, int] = (3, 3)
+    inference: bool = False
 
     @nn.compact
     def __call__(self, x):
         B, H, W, _ = x.shape
 
-        en1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim)(x)
+        en1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         x = nn.max_pool(en1, (2, 2), (2, 2))
 
-        en2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim)(x)
+        en2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         x = nn.max_pool(en2, (2, 2), (2, 2))
 
-        en3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim)(x)
+        en3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         x = nn.max_pool(en3, (2, 2), (2, 2))
 
-        en4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim)(x)
+        en4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         x = nn.max_pool(en4, (2, 2), (2, 2))
 
-        en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
+        en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
 
-        en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
+        en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         sup6 = SideSaliency((B, H, W, 1))(en6)
 
         x = jnp.concatenate([en5, en6], axis=-1)
         x = upsample(x, 2)
-        de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim)(x)
+        de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         sup5 = SideSaliency((B, H, W, 1))(de5)
 
         x = jnp.concatenate([de5, en4], axis=-1)
         x = upsample(x, 2)
-        de4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim)(x)
+        de4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         sup4 = SideSaliency((B, H, W, 1))(de4)
 
         x = jnp.concatenate([de4, en3], axis=-1)
         x = upsample(x, 2)
-        de3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim)(x)
+        de3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         sup3 = SideSaliency((B, H, W, 1))(de3)
 
         x = jnp.concatenate([de3, en2], axis=-1)
         x = upsample(x, 2)
-        de2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim)(x)
+        de2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         sup2 = SideSaliency((B, H, W, 1))(de2)
 
         x = jnp.concatenate([de2, en1], axis=-1)
         x = upsample(x, 2)
-        de1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim)(x)
+        de1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         sup1 = SideSaliency((B, H, W, 1))(de1)
 
         fused = jnp.concatenate([sup1, sup2, sup3, sup4, sup5, sup6], axis=-1)
@@ -308,14 +309,15 @@ if __name__ == "__main__":
     tf.config.set_visible_devices([], "GPU")
     writer = tf.summary.create_file_writer("logs")
 
-    samples = 8
     batch_size = 16
     train_ds, val_ds = duts_dataset(img_dir, label_dir, batch_size)
+    sample_images, sample_labels = next(iter(val_ds))
 
     epochs = 1
     mid_dim = 16
     out_dim = 64
     kernel = (3, 3)
+    log_every = 10
 
     x = jnp.zeros((2, 320, 320, 3))
     model = U2Net(mid_dim, out_dim, kernel)
@@ -324,6 +326,7 @@ if __name__ == "__main__":
 
     tx = optax.adam(1e-3)
     opt_state = tx.init(params)
+
 
     @jax.jit
     def loss_fn(
@@ -352,18 +355,48 @@ if __name__ == "__main__":
 
         return new_params, opt_state, loss
 
-    for e in range(epochs):
-        step = 0
-        metrics_dict = defaultdict(lambda: 0)
-        desc = f"Train Epoch {e}"
-        train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=desc)
-        for xs, ys in train_bar:
-            xs = jnp.asarray(xs)
-            ys = jnp.asarray(ys)
+    with writer.as_default():
 
-            params, opt_state, loss = update(params, opt_state, xs, ys)
-            metrics_dict["loss"] = (step * metrics_dict["loss"] + loss) / (step + 1)
+        tf.summary.image("images", sample_images, step=0)
+        tf.summary.image("labels", sample_labels, step=0)
 
-            train_bar.set_postfix(**metrics_dict)
-            step += 1
+        sample_images_jax = jnp.asarray(sample_images)
+        sample_labels_jax = jnp.asarray(sample_labels)
+
+        sample_predictions = U2Net(mid_dim, out_dim, kernel, True).apply(params, sample_images)
+        for e in range(epochs):
+            train_step = 0
+            val_step = 0
+            metrics_dict = defaultdict(lambda: 0)
+            train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=f"Train Epoch {e}")
+
+            for xs, ys in train_bar:
+                xs = jnp.asarray(xs)
+                ys = jnp.asarray(ys)
+
+                params, opt_state, loss = update(params, opt_state, xs, ys)
+                metrics_dict["train_loss"] = (train_step * metrics_dict["train_loss"] + loss) / (train_step + 1)
+
+                train_bar.set_postfix(**metrics_dict)
+                train_step += 1
+
+            val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=f"Valid Epoch {e}")
+            for xs, ys in val_bar:
+                xs = jnp.asarray(xs)
+                ys = jnp.asarray(ys)
+
+                params, opt_state, loss = loss_fn(params, xs, ys)
+                metrics_dict["val_loss"] = (val_step * metrics_dict["val_loss"] + loss) / (val_step + 1)
+
+                val_bar.set_postfix(**metrics_dict)
+                val_step += 1
+
+            tf.summary.scalar("train_loss", metrics_dict["train_loss"], step=e)
+            tf.summary.scalar("val_loss", metrics_dict["val_loss"], step=e)
+
+            writer.flush()
+
+            if e % log_every == 0:
+                sample_predictions = model.apply(params, sample_images)[..., 0]
+                tf.summary.image("predictions", sample_predictions)
 

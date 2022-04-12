@@ -278,9 +278,8 @@ def parse_image(filename, channels=3):
 
 
 def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: float = 0.2):
-    images = tf.data.Dataset.list_files(str(img_dir / "*"))
+    images = tf.data.Dataset.list_files(str(img_dir / "*"), shuffle=False)
     labels = images.map(lambda x: tf.strings.regex_replace(x, str(img_dir), str(label_dir)))
-
 
     images = images.map(parse_image)
     images = images.map(lambda x: normalize_image(x, -1, 1))
@@ -321,6 +320,7 @@ if __name__ == "__main__":
 
     x = jnp.zeros((2, 320, 320, 3))
     model = U2Net(mid_dim, out_dim, kernel)
+    inference_model = U2Net(mid_dim, out_dim, kernel, True)
     key = random.PRNGKey(0)
     params = model.init(key, x)
 
@@ -363,7 +363,7 @@ if __name__ == "__main__":
         sample_images_jax = jnp.asarray(sample_images)
         sample_labels_jax = jnp.asarray(sample_labels)
 
-        sample_predictions = U2Net(mid_dim, out_dim, kernel, True).apply(params, sample_images)
+        sample_predictions = inference_model.apply(params, sample_images)
         for e in range(epochs):
             train_step = 0
             val_step = 0
@@ -385,7 +385,7 @@ if __name__ == "__main__":
                 xs = jnp.asarray(xs)
                 ys = jnp.asarray(ys)
 
-                params, opt_state, loss = loss_fn(params, xs, ys)
+                loss = loss_fn(params, xs, ys)
                 metrics_dict["val_loss"] = (val_step * metrics_dict["val_loss"] + loss) / (val_step + 1)
 
                 val_bar.set_postfix(**metrics_dict)
@@ -397,6 +397,6 @@ if __name__ == "__main__":
             writer.flush()
 
             if e % log_every == 0:
-                sample_predictions = model.apply(params, sample_images)[..., 0]
-                tf.summary.image("predictions", sample_predictions)
+                sample_predictions = inference_model.apply(params, sample_images_jax)[..., 0]
+                tf.summary.image("predictions", sample_predictions, step=e)
 

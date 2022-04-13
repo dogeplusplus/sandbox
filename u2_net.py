@@ -301,6 +301,13 @@ def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: flo
     return train_ds, val_ds
 
 
+def bce_loss(preds: jnp.ndarray, labels: jnp.ndarray) -> float:
+    EPS = 1e-8
+    preds = jnp.clip(preds, EPS, 1 - EPS)
+    loss = -jnp.mean(labels * jnp.log(preds) + (1 - labels) * jnp.log(1 - preds + EPS))
+    return loss
+
+
 if __name__ == "__main__":
     img_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
     label_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
@@ -314,7 +321,7 @@ if __name__ == "__main__":
     sample_train_img, sample_train_lab = next(iter(train_ds))
     sample_val_img, sample_val_lab = next(iter(val_ds))
 
-    epochs = 1
+    epochs = 100
     mid_dim = 16
     out_dim = 64
     kernel = (3, 3)
@@ -330,6 +337,7 @@ if __name__ == "__main__":
     opt_state = tx.init(params)
 
 
+
     @jax.jit
     def loss_fn(
         params: FrozenDict,
@@ -339,7 +347,7 @@ if __name__ == "__main__":
     ) -> jnp.ndarray:
         saliency_maps, _ = model.apply(params, xs, mutable=["batch_stats"])
         ys = repeat(ys, "b h w 1 -> b h w x", x=len(weights))
-        losses = optax.sigmoid_binary_cross_entropy(saliency_maps, ys)
+        losses = bce_loss(saliency_maps, ys)
         total_loss = jnp.mean(weights * losses)
 
         return total_loss

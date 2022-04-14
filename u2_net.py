@@ -45,15 +45,13 @@ class RSUBlock(nn.Module):
     def __call__(self, x):
         down_levels = [
             ConvBNRelu(self.mid_dim, self.kernel, self.inference)
-            for _ in range(self.levels-1)
+            for _ in range(self.levels - 1)
         ]
-
 
         up_levels = [
             ConvBNRelu(self.mid_dim, self.kernel, self.inference)
             for _ in range(self.levels - 1)
         ]
-
 
         top_left = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
 
@@ -99,10 +97,18 @@ class DilationRSUBlock(nn.Module):
 
         b = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=8)(d4)
 
-        u4 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(jnp.concatenate([d4, b], axis=-1))
-        u3 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(jnp.concatenate([d3, u4], axis=-1))
-        u2 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=2)(jnp.concatenate([d2, u3], axis=-1))
-        u1 = ConvBNRelu(self.out_dim, self.kernel, self.inference)(jnp.concatenate([d1, u2], axis=-1))
+        u4 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(
+            jnp.concatenate([d4, b], axis=-1)
+        )
+        u3 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(
+            jnp.concatenate([d3, u4], axis=-1)
+        )
+        u2 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=2)(
+            jnp.concatenate([d2, u3], axis=-1)
+        )
+        u1 = ConvBNRelu(self.out_dim, self.kernel, self.inference)(
+            jnp.concatenate([d1, u2], axis=-1)
+        )
 
         out = top_left + u1
         return out
@@ -142,14 +148,20 @@ class U2Net(nn.Module):
         en4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
         x = nn.max_pool(en4, (2, 2), (2, 2))
 
-        en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(
+            x
+        )
 
-        en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(
+            x
+        )
         sup6 = SideSaliency((B, H, W, 1))(en6)
 
         x = jnp.concatenate([en5, en6], axis=-1)
         x = upsample(x, 2)
-        de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(
+            x
+        )
         sup5 = SideSaliency((B, H, W, 1))(de5)
 
         x = jnp.concatenate([de5, en4], axis=-1)
@@ -181,7 +193,7 @@ class U2Net(nn.Module):
 
 def test_conv_block():
     out = 5
-    kernel = (3,3)
+    kernel = (3, 3)
 
     x = jnp.ones((4, 128, 128, 3))
     layer = ConvBNRelu(out, kernel)
@@ -196,8 +208,8 @@ def test_conv_block():
 
 def test_rsu_block():
     levels = 2
-    out_dim= 5
-    kernel = (3,3)
+    out_dim = 5
+    kernel = (3, 3)
     mid_dim = 16
 
     x = jnp.ones((4, 128, 128, 3))
@@ -211,8 +223,8 @@ def test_rsu_block():
 
 
 def test_dilation_rsu_block():
-    out_dim= 6
-    kernel = (3,3)
+    out_dim = 6
+    kernel = (3, 3)
     mid_dim = 16
 
     x = jnp.ones((4, 32, 32, 3))
@@ -277,9 +289,17 @@ def parse_image(filename, channels=3):
     return image
 
 
-def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: float = 0.2, shuffle_buffer: int = 8):
+def duts_dataset(
+    img_dir: Path,
+    label_dir: Path,
+    batch_size: int,
+    val_ratio: float = 0.2,
+    shuffle_buffer: int = 8,
+):
     images = tf.data.Dataset.list_files(str(img_dir / "*"), shuffle=False)
-    labels = images.map(lambda x: tf.strings.regex_replace(x, str(img_dir), str(label_dir)))
+    labels = images.map(
+        lambda x: tf.strings.regex_replace(x, str(img_dir), str(label_dir))
+    )
 
     images = images.map(parse_image)
     images = images.map(lambda x: normalize_image(x, -1, 1))
@@ -295,8 +315,16 @@ def duts_dataset(img_dir: Path, label_dir: Path, batch_size: int, val_ratio: flo
     val_ds = ds.take(val_size)
     train_ds = ds.skip(val_size)
 
-    train_ds = train_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    train_ds = (
+        train_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    val_ds = (
+        val_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
     return train_ds, val_ds
 
@@ -336,8 +364,6 @@ if __name__ == "__main__":
     tx = optax.adam(1e-3)
     opt_state = tx.init(params)
 
-
-
     @jax.jit
     def loss_fn(
         params: FrozenDict,
@@ -354,17 +380,13 @@ if __name__ == "__main__":
 
     @jax.jit
     def update(
-        params: FrozenDict,
-        opt_state: optax.OptState,
-        xs: jnp.ndarray,
-        ys: jnp.ndarray,
+        params: FrozenDict, opt_state: optax.OptState, xs: jnp.ndarray, ys: jnp.ndarray,
     ) -> t.Tuple[FrozenDict, optax.OptState, jnp.ndarray]:
         loss, grads = jax.value_and_grad(loss_fn)(params, xs, ys)
         updates, opt_state = tx.update(grads, opt_state)
         new_params = optax.apply_updates(params, updates)
 
         return new_params, opt_state, loss
-
 
     with train_writer.as_default():
         tf.summary.image("images", sample_train_img, step=0, max_outputs=8)
@@ -373,7 +395,6 @@ if __name__ == "__main__":
     with valid_writer.as_default():
         tf.summary.image("images", sample_val_img, step=0, max_outputs=8)
         tf.summary.image("labels", sample_val_lab, step=0, max_outputs=8)
-
 
     train_jax_img = jnp.asarray(sample_train_img)
     train_jax_lab = jnp.asarray(sample_train_lab)
@@ -384,14 +405,18 @@ if __name__ == "__main__":
         train_step = 0
         val_step = 0
         metrics_dict = defaultdict(lambda: 0)
-        train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=f"Train Epoch {e}")
+        train_bar = tqdm(
+            train_ds, total=len(train_ds), ncols=0, desc=f"Train Epoch {e}"
+        )
 
         for xs, ys in train_bar:
             xs = jnp.asarray(xs)
             ys = jnp.asarray(ys)
 
             params, opt_state, loss = update(params, opt_state, xs, ys)
-            metrics_dict["train_loss"] = (train_step * metrics_dict["train_loss"] + loss) / (train_step + 1)
+            metrics_dict["train_loss"] = (
+                train_step * metrics_dict["train_loss"] + loss
+            ) / (train_step + 1)
 
             train_bar.set_postfix(**metrics_dict)
             train_step += 1
@@ -402,7 +427,9 @@ if __name__ == "__main__":
             ys = jnp.asarray(ys)
 
             loss = loss_fn(params, xs, ys)
-            metrics_dict["val_loss"] = (val_step * metrics_dict["val_loss"] + loss) / (val_step + 1)
+            metrics_dict["val_loss"] = (val_step * metrics_dict["val_loss"] + loss) / (
+                val_step + 1
+            )
 
             val_bar.set_postfix(**metrics_dict)
             val_step += 1
@@ -411,7 +438,6 @@ if __name__ == "__main__":
             tf.summary.scalar("loss", metrics_dict["train_loss"], step=e)
         with valid_writer.as_default():
             tf.summary.scalar("loss", metrics_dict["val_loss"], step=e)
-
 
         if e % log_every == 0:
             with train_writer.as_default():
@@ -424,4 +450,3 @@ if __name__ == "__main__":
 
         train_writer.flush()
         valid_writer.flush()
-

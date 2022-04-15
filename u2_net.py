@@ -36,24 +36,24 @@ class ConvBNRelu(nn.Module):
 
 class RSUBlock(nn.Module):
     levels: int
-    out_dim: int
+    out: int
     kernel: int
-    mid_dim: int
+    mid: int
     inference: bool = False
 
     @nn.compact
     def __call__(self, x):
         down_levels = [
-            ConvBNRelu(self.mid_dim, self.kernel, self.inference)
+            ConvBNRelu(self.mid, self.kernel, self.inference)
             for _ in range(self.levels - 1)
         ]
 
         up_levels = [
-            ConvBNRelu(self.mid_dim, self.kernel, self.inference)
+            ConvBNRelu(self.mid, self.kernel, self.inference)
             for _ in range(self.levels - 1)
         ]
 
-        top_left = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
+        top_left = ConvBNRelu(self.out, self.kernel, self.inference)(x)
 
         x = top_left
         down_stack = []
@@ -63,9 +63,9 @@ class RSUBlock(nn.Module):
             x = nn.max_pool(x, (2, 2), (2, 2))
 
         # Insert another convolution without the pooling at the bottom
-        down_stack.insert(0, ConvBNRelu(self.mid_dim, self.kernel, self.inference)(x))
+        down_stack.insert(0, ConvBNRelu(self.mid, self.kernel, self.inference)(x))
 
-        x = ConvBNRelu(self.mid_dim, self.kernel, self.inference, 2)(x)
+        x = ConvBNRelu(self.mid, self.kernel, self.inference, 2)(x)
 
         for down, layer in zip(down_stack, up_levels):
             x = jnp.concatenate([down, x], axis=-1)
@@ -73,40 +73,40 @@ class RSUBlock(nn.Module):
             x = upsample(x, 2)
 
         # Final convolution at the top right before concatenation
-        x = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
+        x = ConvBNRelu(self.out, self.kernel, self.inference)(x)
         out = top_left + x
 
         return out
 
 
 class DilationRSUBlock(nn.Module):
-    out_dim: int
+    out: int
     kernel: int
-    mid_dim: int
+    mid: int
     inference: bool = False
 
     @nn.compact
     def __call__(self, x):
-        top_left = ConvBNRelu(self.out_dim, self.kernel, self.inference)(x)
+        top_left = ConvBNRelu(self.out, self.kernel, self.inference)(x)
 
         x = top_left
-        d1 = ConvBNRelu(self.mid_dim, self.kernel, self.inference)(x)
-        d2 = ConvBNRelu(self.mid_dim, self.kernel, self.inference)(d1)
-        d3 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=2)(d2)
-        d4 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(d3)
+        d1 = ConvBNRelu(self.mid, self.kernel, self.inference)(x)
+        d2 = ConvBNRelu(self.mid, self.kernel, self.inference)(d1)
+        d3 = ConvBNRelu(self.mid, self.kernel, self.inference, dilation=2)(d2)
+        d4 = ConvBNRelu(self.mid, self.kernel, self.inference, dilation=4)(d3)
 
-        b = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=8)(d4)
+        b = ConvBNRelu(self.mid, self.kernel, self.inference, dilation=8)(d4)
 
-        u4 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(
+        u4 = ConvBNRelu(self.mid, self.kernel, self.inference, dilation=4)(
             jnp.concatenate([d4, b], axis=-1)
         )
-        u3 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=4)(
+        u3 = ConvBNRelu(self.mid, self.kernel, self.inference, dilation=4)(
             jnp.concatenate([d3, u4], axis=-1)
         )
-        u2 = ConvBNRelu(self.mid_dim, self.kernel, self.inference, dilation=2)(
+        u2 = ConvBNRelu(self.mid, self.kernel, self.inference, dilation=2)(
             jnp.concatenate([d2, u3], axis=-1)
         )
-        u1 = ConvBNRelu(self.out_dim, self.kernel, self.inference)(
+        u1 = ConvBNRelu(self.out, self.kernel, self.inference)(
             jnp.concatenate([d1, u2], axis=-1)
         )
 
@@ -127,8 +127,8 @@ class SideSaliency(nn.Module):
 
 
 class U2Net(nn.Module):
-    mid_dim: int = 16
-    out_dim: int = 64
+    mid: int = 16
+    out: int = 64
     kernel: t.Tuple[int, int] = (3, 3)
     inference: bool = False
 
@@ -136,52 +136,52 @@ class U2Net(nn.Module):
     def __call__(self, x):
         B, H, W, _ = x.shape
 
-        en1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        en1 = RSUBlock(7, self.out, self.kernel, self.mid, self.inference)(x)
         x = nn.max_pool(en1, (2, 2), (2, 2))
 
-        en2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        en2 = RSUBlock(6, self.out, self.kernel, self.mid, self.inference)(x)
         x = nn.max_pool(en2, (2, 2), (2, 2))
 
-        en3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        en3 = RSUBlock(5, self.out, self.kernel, self.mid, self.inference)(x)
         x = nn.max_pool(en3, (2, 2), (2, 2))
 
-        en4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        en4 = RSUBlock(4, self.out, self.kernel, self.mid, self.inference)(x)
         x = nn.max_pool(en4, (2, 2), (2, 2))
 
-        en5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(
+        en5 = DilationRSUBlock(self.out, self.kernel, self.mid, self.inference)(
             x
         )
 
-        en6 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(
+        en6 = DilationRSUBlock(self.out, self.kernel, self.mid, self.inference)(
             x
         )
         sup6 = SideSaliency((B, H, W, 1))(en6)
 
         x = jnp.concatenate([en5, en6], axis=-1)
         x = upsample(x, 2)
-        de5 = DilationRSUBlock(self.out_dim, self.kernel, self.mid_dim, self.inference)(
+        de5 = DilationRSUBlock(self.out, self.kernel, self.mid, self.inference)(
             x
         )
         sup5 = SideSaliency((B, H, W, 1))(de5)
 
         x = jnp.concatenate([de5, en4], axis=-1)
         x = upsample(x, 2)
-        de4 = RSUBlock(4, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        de4 = RSUBlock(4, self.out, self.kernel, self.mid, self.inference)(x)
         sup4 = SideSaliency((B, H, W, 1))(de4)
 
         x = jnp.concatenate([de4, en3], axis=-1)
         x = upsample(x, 2)
-        de3 = RSUBlock(5, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        de3 = RSUBlock(5, self.out, self.kernel, self.mid, self.inference)(x)
         sup3 = SideSaliency((B, H, W, 1))(de3)
 
         x = jnp.concatenate([de3, en2], axis=-1)
         x = upsample(x, 2)
-        de2 = RSUBlock(6, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        de2 = RSUBlock(6, self.out, self.kernel, self.mid, self.inference)(x)
         sup2 = SideSaliency((B, H, W, 1))(de2)
 
         x = jnp.concatenate([de2, en1], axis=-1)
         x = upsample(x, 2)
-        de1 = RSUBlock(7, self.out_dim, self.kernel, self.mid_dim, self.inference)(x)
+        de1 = RSUBlock(7, self.out, self.kernel, self.mid, self.inference)(x)
         sup1 = SideSaliency((B, H, W, 1))(de1)
 
         fused = jnp.concatenate([sup1, sup2, sup3, sup4, sup5, sup6], axis=-1)
@@ -208,33 +208,33 @@ def test_conv_block():
 
 def test_rsu_block():
     levels = 2
-    out_dim = 5
+    out = 5
     kernel = (3, 3)
-    mid_dim = 16
+    mid = 16
 
     x = jnp.ones((4, 128, 128, 3))
-    block = RSUBlock(levels, out_dim, kernel, mid_dim)
+    block = RSUBlock(levels, out, kernel, mid)
     key = random.PRNGKey(0)
     params = block.init(key, x)
 
     y, _ = block.apply(params, x, mutable=["batch_stats"])
 
-    assert y.shape == (4, 128, 128, out_dim)
+    assert y.shape == (4, 128, 128, out)
 
 
 def test_dilation_rsu_block():
-    out_dim = 6
+    out = 6
     kernel = (3, 3)
-    mid_dim = 16
+    mid = 16
 
     x = jnp.ones((4, 32, 32, 3))
-    block = DilationRSUBlock(out_dim, kernel, mid_dim)
+    block = DilationRSUBlock(out, kernel, mid)
     key = random.PRNGKey(0)
     params = block.init(key, x)
 
     y, _ = block.apply(params, x, mutable=["batch_stats"])
 
-    assert y.shape == (4, 32, 32, out_dim)
+    assert y.shape == (4, 32, 32, out)
 
 
 def test_upsample():
@@ -245,12 +245,12 @@ def test_upsample():
 
 
 def test_u2_net():
-    mid_dim = 16
-    out_dim = 64
+    mid = 16
+    out = 64
     kernel = (3, 3)
 
     x = jnp.ones((4, 256, 256, 3))
-    model = U2Net(mid_dim, out_dim, kernel)
+    model = U2Net(mid, out, kernel)
     key = random.PRNGKey(0)
     params = model.init(key, x)
 
@@ -350,14 +350,14 @@ if __name__ == "__main__":
     sample_val_img, sample_val_lab = next(iter(val_ds))
 
     epochs = 100
-    mid_dim = 16
-    out_dim = 64
+    mid = 16
+    out = 64
     kernel = (3, 3)
     log_every = 10
 
     x = jnp.zeros((2, 320, 320, 3))
-    model = U2Net(mid_dim, out_dim, kernel)
-    inference_model = U2Net(mid_dim, out_dim, kernel, True)
+    model = U2Net(mid, out, kernel)
+    inference_model = U2Net(mid, out, kernel, True)
     key = random.PRNGKey(0)
     params = model.init(key, x)
 

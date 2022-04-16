@@ -23,13 +23,11 @@ def upsample(x: jnp.ndarray, factor: int) -> jnp.ndarray:
 class ConvLNRelu(nn.Module):
     out: int
     kernel: int
-    inference: bool = False
     dilation: int = 1
 
     @nn.compact
     def __call__(self, x):
         x = nn.Conv(self.out, self.kernel, kernel_dilation=self.dilation)(x)
-        # x = nn.BatchNorm(use_running_average=self.inference)(x)
         x = nn.LayerNorm()(x)
         x = nn.relu(x)
 
@@ -41,21 +39,20 @@ class RSUBlock(nn.Module):
     out: int
     kernel: int
     mid: int
-    inference: bool = False
 
     @nn.compact
     def __call__(self, x):
         down_levels = [
-            ConvLNRelu(self.mid, self.kernel, self.inference)
+            ConvLNRelu(self.mid, self.kernel)
             for _ in range(self.levels - 1)
         ]
 
         up_levels = [
-            ConvLNRelu(self.mid, self.kernel, self.inference)
+            ConvLNRelu(self.mid, self.kernel)
             for _ in range(self.levels - 1)
         ]
 
-        top_left = ConvLNRelu(self.out, self.kernel, self.inference)(x)
+        top_left = ConvLNRelu(self.out, self.kernel)(x)
 
         x = top_left
         down_stack = []
@@ -65,9 +62,9 @@ class RSUBlock(nn.Module):
             x = nn.max_pool(x, (2, 2), (2, 2))
 
         # Insert another convolution without the pooling at the bottom
-        down_stack.insert(0, ConvLNRelu(self.mid, self.kernel, self.inference)(x))
+        down_stack.insert(0, ConvLNRelu(self.mid, self.kernel)(x))
 
-        x = ConvLNRelu(self.mid, self.kernel, self.inference, 2)(x)
+        x = ConvLNRelu(self.mid, self.kernel, 2)(x)
 
         for down, layer in zip(down_stack, up_levels):
             x = jnp.concatenate([down, x], axis=-1)
@@ -75,7 +72,7 @@ class RSUBlock(nn.Module):
             x = upsample(x, 2)
 
         # Final convolution at the top right before concatenation
-        x = ConvLNRelu(self.out, self.kernel, self.inference)(x)
+        x = ConvLNRelu(self.out, self.kernel)(x)
         out = top_left + x
 
         return out
@@ -85,30 +82,29 @@ class DilationRSUBlock(nn.Module):
     out: int
     kernel: int
     mid: int
-    inference: bool = False
 
     @nn.compact
     def __call__(self, x):
-        top_left = ConvLNRelu(self.out, self.kernel, self.inference)(x)
+        top_left = ConvLNRelu(self.out, self.kernel)(x)
 
         x = top_left
-        d1 = ConvLNRelu(self.mid, self.kernel, self.inference)(x)
-        d2 = ConvLNRelu(self.mid, self.kernel, self.inference)(d1)
-        d3 = ConvLNRelu(self.mid, self.kernel, self.inference, dilation=2)(d2)
-        d4 = ConvLNRelu(self.mid, self.kernel, self.inference, dilation=4)(d3)
+        d1 = ConvLNRelu(self.mid, self.kernel)(x)
+        d2 = ConvLNRelu(self.mid, self.kernel)(d1)
+        d3 = ConvLNRelu(self.mid, self.kernel, dilation=2)(d2)
+        d4 = ConvLNRelu(self.mid, self.kernel, dilation=4)(d3)
 
-        b = ConvLNRelu(self.mid, self.kernel, self.inference, dilation=8)(d4)
+        b = ConvLNRelu(self.mid, self.kernel, dilation=8)(d4)
 
-        u4 = ConvLNRelu(self.mid, self.kernel, self.inference, dilation=4)(
+        u4 = ConvLNRelu(self.mid, self.kernel, dilation=4)(
             jnp.concatenate([d4, b], axis=-1)
         )
-        u3 = ConvLNRelu(self.mid, self.kernel, self.inference, dilation=4)(
+        u3 = ConvLNRelu(self.mid, self.kernel, dilation=4)(
             jnp.concatenate([d3, u4], axis=-1)
         )
-        u2 = ConvLNRelu(self.mid, self.kernel, self.inference, dilation=2)(
+        u2 = ConvLNRelu(self.mid, self.kernel, dilation=2)(
             jnp.concatenate([d2, u3], axis=-1)
         )
-        u1 = ConvLNRelu(self.out, self.kernel, self.inference)(
+        u1 = ConvLNRelu(self.out, self.kernel)(
             jnp.concatenate([d1, u2], axis=-1)
         )
 
@@ -132,58 +128,51 @@ class U2Net(nn.Module):
     mid: int = 16
     out: int = 64
     kernel: t.Tuple[int, int] = (3, 3)
-    inference: bool = False
 
     @nn.compact
     def __call__(self, x):
         B, H, W, _ = x.shape
 
-        en1 = RSUBlock(7, self.out, self.kernel, self.mid, self.inference)(x)
+        en1 = RSUBlock(7, self.out, self.kernel, self.mid)(x)
         x = nn.max_pool(en1, (2, 2), (2, 2))
 
-        en2 = RSUBlock(6, self.out, self.kernel, self.mid, self.inference)(x)
+        en2 = RSUBlock(6, self.out, self.kernel, self.mid)(x)
         x = nn.max_pool(en2, (2, 2), (2, 2))
 
-        en3 = RSUBlock(5, self.out, self.kernel, self.mid, self.inference)(x)
+        en3 = RSUBlock(5, self.out, self.kernel, self.mid)(x)
         x = nn.max_pool(en3, (2, 2), (2, 2))
 
-        en4 = RSUBlock(4, self.out, self.kernel, self.mid, self.inference)(x)
+        en4 = RSUBlock(4, self.out, self.kernel, self.mid)(x)
         x = nn.max_pool(en4, (2, 2), (2, 2))
 
-        en5 = DilationRSUBlock(self.out, self.kernel, self.mid, self.inference)(
-            x
-        )
+        en5 = DilationRSUBlock(self.out, self.kernel, self.mid)(x)
 
-        en6 = DilationRSUBlock(self.out, self.kernel, self.mid, self.inference)(
-            x
-        )
+        en6 = DilationRSUBlock(self.out, self.kernel, self.mid)(x)
         sup6 = SideSaliency((B, H, W, 1))(en6)
 
         x = jnp.concatenate([en5, en6], axis=-1)
         x = upsample(x, 2)
-        de5 = DilationRSUBlock(self.out, self.kernel, self.mid, self.inference)(
-            x
-        )
+        de5 = DilationRSUBlock(self.out, self.kernel, self.mid)(x)
         sup5 = SideSaliency((B, H, W, 1))(de5)
 
         x = jnp.concatenate([de5, en4], axis=-1)
         x = upsample(x, 2)
-        de4 = RSUBlock(4, self.out, self.kernel, self.mid, self.inference)(x)
+        de4 = RSUBlock(4, self.out, self.kernel, self.mid)(x)
         sup4 = SideSaliency((B, H, W, 1))(de4)
 
         x = jnp.concatenate([de4, en3], axis=-1)
         x = upsample(x, 2)
-        de3 = RSUBlock(5, self.out, self.kernel, self.mid, self.inference)(x)
+        de3 = RSUBlock(5, self.out, self.kernel, self.mid)(x)
         sup3 = SideSaliency((B, H, W, 1))(de3)
 
         x = jnp.concatenate([de3, en2], axis=-1)
         x = upsample(x, 2)
-        de2 = RSUBlock(6, self.out, self.kernel, self.mid, self.inference)(x)
+        de2 = RSUBlock(6, self.out, self.kernel, self.mid)(x)
         sup2 = SideSaliency((B, H, W, 1))(de2)
 
         x = jnp.concatenate([de2, en1], axis=-1)
         x = upsample(x, 2)
-        de1 = RSUBlock(7, self.out, self.kernel, self.mid, self.inference)(x)
+        de1 = RSUBlock(7, self.out, self.kernel, self.mid)(x)
         sup1 = SideSaliency((B, H, W, 1))(de1)
 
         fused = jnp.concatenate([sup1, sup2, sup3, sup4, sup5, sup6], axis=-1)
@@ -408,7 +397,6 @@ def main():
 
     x = jnp.zeros((2, 320, 320, 3))
     model = U2Net(mid, out, kernel)
-    inference_model = U2Net(mid, out, kernel, True)
     key = random.PRNGKey(0)
     params = model.init(key, x)
 
@@ -439,6 +427,13 @@ def main():
 
         return new_params, opt_state, loss
 
+
+    @jax.jit
+    def mean_absolute_error(params: FrozenDict, xs: jnp.ndarray, ys: jnp.ndarray) -> jnp.ndarray:
+        pred = model.apply(params, xs)
+        return (pred - ys).mean()
+
+
     with train_writer.as_default():
         tf.summary.image("images", sample_train_img, step=0, max_outputs=8)
         tf.summary.image("labels", sample_train_lab, step=0, max_outputs=8)
@@ -451,10 +446,8 @@ def main():
     val_jax_img = jnp.asarray(sample_val_img)
 
     for e in range(epochs):
-        train_step = 0
-        val_step = 0
-        train_metrics = defaultdict(lambda: 0)
-        val_metrics = defaultdict(lambda: 0)
+        train_metrics = defaultdict(lambda: tf.keras.metrics.Mean())
+        val_metrics = defaultdict(lambda: tf.keras.metrics.Mean())
         train_bar = tqdm(train_ds, total=len(train_ds), ncols=0, desc=f"Train Epoch {e}")
         val_bar = tqdm(val_ds, total=len(val_ds), ncols=0, desc=f"Valid Epoch {e}")
 
@@ -463,38 +456,40 @@ def main():
             ys = jnp.asarray(ys)
 
             params, opt_state, loss = update(params, opt_state, xs, ys)
-            train_metrics["loss"] = (train_step * train_metrics["loss"] + loss) / (train_step + 1)
+            train_metrics["loss"].update_state(loss)
+            mae = mean_absolute_error(params, xs, ys)
+            train_metrics["mae"].update_state(mae)
 
-            train_bar.set_postfix(**train_metrics)
-            train_step += 1
+            train_bar.set_postfix(**{k: v.result().numpy() for k, v in train_metrics.items()})
 
         for xs, ys in val_bar:
             xs = jnp.asarray(xs)
             ys = jnp.asarray(ys)
 
             loss = loss_fn(params, xs, ys)
-            val_metrics["loss"] = (val_step * val_metrics["loss"] + loss) / (
-                val_step + 1
-            )
+            val_metrics["loss"].update_state(loss)
+            mae = mean_absolute_error(params, xs, ys)
+            val_metrics["mae"].update_state(mae)
 
             val_bar.set_postfix(**val_metrics)
-            val_step += 1
 
         with train_writer.as_default():
             tf.summary.scalar("loss", train_metrics["loss"], step=e)
+            tf.summary.scalar("mae", train_metrics["mae"], step=e)
         with valid_writer.as_default():
             tf.summary.scalar("loss", val_metrics["loss"], step=e)
+            tf.summary.scalar("mae", val_metrics["mae"], step=e)
 
         if e % log_every == 0:
             pickle.dump(params, open("weights.pkl", "wb"))
             pickle.dump(opt_state, open("optimizer.pkl", "wb"))
 
             with train_writer.as_default():
-                pred_train = inference_model.apply(params, train_jax_img)[..., [0]]
+                pred_train = model.apply(params, train_jax_img)[..., [0]]
                 tf.summary.image("predictions", pred_train, step=e, max_outputs=8)
 
             with valid_writer.as_default():
-                pred_val = inference_model.apply(params, val_jax_img)[..., [0]]
+                pred_val = model.apply(params, val_jax_img)[..., [0]]
                 tf.summary.image("predictions", pred_val, step=e, max_outputs=8)
 
         train_writer.flush()

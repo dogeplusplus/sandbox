@@ -1,6 +1,7 @@
 import jax
 import optax
 import pickle
+import datetime
 import typing as t
 import jax.numpy as jnp
 import flax.linen as nn
@@ -191,7 +192,7 @@ def test_conv_block():
     key = random.PRNGKey(0)
     params = layer.init(key, x)
 
-    y, mutated_vars = layer.apply(params, x, mutable=["batch_stats"])
+    y, mutated_vars = layer.apply(params, x)
 
     assert y.shape == (4, 128, 128, out)
     assert "batch_stats" in mutated_vars.keys()
@@ -208,7 +209,7 @@ def test_rsu_block():
     key = random.PRNGKey(0)
     params = block.init(key, x)
 
-    y, _ = block.apply(params, x, mutable=["batch_stats"])
+    y, _ = block.apply(params, x)
 
     assert y.shape == (4, 128, 128, out)
 
@@ -223,7 +224,7 @@ def test_dilation_rsu_block():
     key = random.PRNGKey(0)
     params = block.init(key, x)
 
-    y, _ = block.apply(params, x, mutable=["batch_stats"])
+    y, _ = block.apply(params, x)
 
     assert y.shape == (4, 32, 32, out)
 
@@ -245,7 +246,7 @@ def test_u2_net():
     key = random.PRNGKey(0)
     params = model.init(key, x)
 
-    saliency_maps, _ = model.apply(params, x, mutable=["batch_stats"])
+    saliency_maps, _ = model.apply(params, x)
     assert saliency_maps.shape == (4, 256, 256, 7)
     assert jnp.max(saliency_maps) <= 1
     assert jnp.min(saliency_maps) >= 0
@@ -305,12 +306,6 @@ def duts_dataset(
 
     val_ds = ds.take(val_size)
     train_ds = ds.skip(val_size)
-
-    augmentation = tf.keras.Sequential([
-        tf.keras.layers.RandomFlip("horizontal_and_vertical"),
-        tf.keras.layers.RandomRotation(0.2),
-    ])
-    train_ds = train_ds.map(augmentation)
 
     train_ds = (
         train_ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
@@ -379,21 +374,22 @@ def bce_loss(preds: jnp.ndarray, labels: jnp.ndarray) -> float:
 def main():
     img_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Image")
     label_dir = Path("..", "..", "Downloads", "DUTS-TR", "DUTS-TR-Mask")
+    date = datetime.datetime.now().strftime("%Y%m%d-%H:%M:%S")
 
     tf.config.set_visible_devices([], "GPU")
-    train_writer = tf.summary.create_file_writer("logs/train")
-    valid_writer = tf.summary.create_file_writer("logs/valid")
+    train_writer = tf.summary.create_file_writer(f"logs/{date}/train")
+    valid_writer = tf.summary.create_file_writer(f"logs/{date}/valid")
 
-    batch_size = 8
+    batch_size = 4
     train_ds, val_ds = duts_dataset(img_dir, label_dir, batch_size)
     sample_train_img, sample_train_lab = next(iter(train_ds))
     sample_val_img, sample_val_lab = next(iter(val_ds))
 
     epochs = 100
-    mid = 16
+    mid = 64
     out = 64
     kernel = (3, 3)
-    log_every = 1
+    log_every = 5
 
     x = jnp.zeros((2, 320, 320, 3))
     model = U2Net(mid, out, kernel)
@@ -410,7 +406,7 @@ def main():
         ys: jnp.ndarray,
         weights: jnp.ndarray = jnp.ones(7),
     ) -> jnp.ndarray:
-        saliency_maps, _ = model.apply(params, xs, mutable=["batch_stats"])
+        saliency_maps = model.apply(params, xs)
         ys = repeat(ys, "b h w 1 -> b h w x", x=len(weights))
         losses = bce_loss(saliency_maps, ys)
         total_loss = jnp.mean(weights * losses)
@@ -427,11 +423,10 @@ def main():
 
         return new_params, opt_state, loss
 
-
     @jax.jit
     def mean_absolute_error(params: FrozenDict, xs: jnp.ndarray, ys: jnp.ndarray) -> jnp.ndarray:
-        pred = model.apply(params, xs)
-        return (pred - ys).mean()
+        saliency_maps = model.apply(params, xs)[..., [0]]
+        return (saliency_maps - ys).mean()
 
 
     with train_writer.as_default():

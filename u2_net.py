@@ -466,14 +466,14 @@ def main():
             mae = mean_absolute_error(params, xs, ys)
             val_metrics["mae"].update_state(mae)
 
-            val_bar.set_postfix(**val_metrics)
+            val_bar.set_postfix(**{k: v.result().numpy() for k, v in val_metrics.items()})
 
         with train_writer.as_default():
-            tf.summary.scalar("loss", train_metrics["loss"], step=e)
-            tf.summary.scalar("mae", train_metrics["mae"], step=e)
+            tf.summary.scalar("loss", train_metrics["loss"].result().numpy(), step=e)
+            tf.summary.scalar("mae", train_metrics["mae"].result().numpy(), step=e)
         with valid_writer.as_default():
-            tf.summary.scalar("loss", val_metrics["loss"], step=e)
-            tf.summary.scalar("mae", val_metrics["mae"], step=e)
+            tf.summary.scalar("loss", val_metrics["loss"].result().numpy(), step=e)
+            tf.summary.scalar("mae", val_metrics["mae"].result().numpy(), step=e)
 
         if e % log_every == 0:
             pickle.dump(params, open("weights.pkl", "wb"))

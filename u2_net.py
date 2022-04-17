@@ -11,8 +11,12 @@ from pathlib import Path
 from einops import repeat
 from tqdm import tqdm
 from jax import random
+from dataclasses import field
 from collections import defaultdict
 from flax.core.frozen_dict import FrozenDict
+
+
+IMAGE_SIZE = 128
 
 
 def upsample(x: jnp.ndarray, factor: int) -> jnp.ndarray:
@@ -126,7 +130,7 @@ class SideSaliency(nn.Module):
 
 
 class U2Net(nn.Module):
-    mid: int = 16
+    mid: t.List[int] = field(default_factory=lambda: [16] * 11)
     out: int = 64
     kernel: t.Tuple[int, int] = (3, 3)
 
@@ -134,46 +138,46 @@ class U2Net(nn.Module):
     def __call__(self, x):
         B, H, W, _ = x.shape
 
-        en1 = RSUBlock(7, self.out, self.kernel, self.mid)(x)
+        en1 = RSUBlock(7, self.out, self.kernel, self.mid[0])(x)
         x = nn.max_pool(en1, (2, 2), (2, 2))
 
-        en2 = RSUBlock(6, self.out, self.kernel, self.mid)(x)
+        en2 = RSUBlock(6, self.out, self.kernel, self.mid[1])(x)
         x = nn.max_pool(en2, (2, 2), (2, 2))
 
-        en3 = RSUBlock(5, self.out, self.kernel, self.mid)(x)
+        en3 = RSUBlock(5, self.out, self.kernel, self.mid[2])(x)
         x = nn.max_pool(en3, (2, 2), (2, 2))
 
-        en4 = RSUBlock(4, self.out, self.kernel, self.mid)(x)
+        en4 = RSUBlock(4, self.out, self.kernel, self.mid[3])(x)
         x = nn.max_pool(en4, (2, 2), (2, 2))
 
-        en5 = DilationRSUBlock(self.out, self.kernel, self.mid)(x)
+        en5 = DilationRSUBlock(self.out, self.kernel, self.mid[4])(x)
 
-        en6 = DilationRSUBlock(self.out, self.kernel, self.mid)(x)
+        en6 = DilationRSUBlock(self.out, self.kernel, self.mid[5])(x)
         sup6 = SideSaliency((B, H, W, 1))(en6)
 
         x = jnp.concatenate([en5, en6], axis=-1)
         x = upsample(x, 2)
-        de5 = DilationRSUBlock(self.out, self.kernel, self.mid)(x)
+        de5 = DilationRSUBlock(self.out, self.kernel, self.mid[6])(x)
         sup5 = SideSaliency((B, H, W, 1))(de5)
 
         x = jnp.concatenate([de5, en4], axis=-1)
         x = upsample(x, 2)
-        de4 = RSUBlock(4, self.out, self.kernel, self.mid)(x)
+        de4 = RSUBlock(4, self.out, self.kernel, self.mid[7])(x)
         sup4 = SideSaliency((B, H, W, 1))(de4)
 
         x = jnp.concatenate([de4, en3], axis=-1)
         x = upsample(x, 2)
-        de3 = RSUBlock(5, self.out, self.kernel, self.mid)(x)
+        de3 = RSUBlock(5, self.out, self.kernel, self.mid[8])(x)
         sup3 = SideSaliency((B, H, W, 1))(de3)
 
         x = jnp.concatenate([de3, en2], axis=-1)
         x = upsample(x, 2)
-        de2 = RSUBlock(6, self.out, self.kernel, self.mid)(x)
+        de2 = RSUBlock(6, self.out, self.kernel, self.mid[9])(x)
         sup2 = SideSaliency((B, H, W, 1))(de2)
 
         x = jnp.concatenate([de2, en1], axis=-1)
         x = upsample(x, 2)
-        de1 = RSUBlock(7, self.out, self.kernel, self.mid)(x)
+        de1 = RSUBlock(7, self.out, self.kernel, self.mid[10])(x)
         sup1 = SideSaliency((B, H, W, 1))(de1)
 
         fused = jnp.concatenate([sup1, sup2, sup3, sup4, sup5, sup6], axis=-1)
@@ -277,7 +281,7 @@ def parse_image(filename, channels=3):
     image = tf.io.read_file(filename)
     image = tf.io.decode_image(image, channels, expand_animations=False)
     image = tf.image.convert_image_dtype(image, tf.float32)
-    image = tf.image.resize(image, [320, 320])
+    image = tf.image.resize(image, [IMAGE_SIZE, IMAGE_SIZE])
     return image
 
 
@@ -385,13 +389,13 @@ def main():
     sample_train_img, sample_train_lab = next(iter(train_ds))
     sample_val_img, sample_val_lab = next(iter(val_ds))
 
-    epochs = 100
-    mid = 64
+    epochs = 1
+    mid = [64] * 11
     out = 64
     kernel = (3, 3)
     log_every = 5
 
-    x = jnp.zeros((2, 320, 320, 3))
+    x = jnp.zeros((2, IMAGE_SIZE, IMAGE_SIZE, 3))
     model = U2Net(mid, out, kernel)
     key = random.PRNGKey(0)
     params = model.init(key, x)
@@ -415,7 +419,7 @@ def main():
 
     @jax.jit
     def update(
-        params: FrozenDict, opt_state: optax.OptState, xs: jnp.ndarray, ys: jnp.ndarray,
+        params: FrozenDict, opt_state: optax.OptState, xs: jnp.ndarray, ys: jnp.ndarray
     ) -> t.Tuple[FrozenDict, optax.OptState, jnp.ndarray]:
         loss, grads = jax.value_and_grad(loss_fn)(params, xs, ys)
         updates, opt_state = tx.update(grads, opt_state)

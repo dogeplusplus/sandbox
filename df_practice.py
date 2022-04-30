@@ -59,4 +59,33 @@ series = pd.Series([1, 7, 1, 6, 9, 1, 2, 9, 1, 2, 9, 2, 9, 0, 0])
 counts = series.value_counts()
 
 series[series != series.mode()[0]] = "Other"
+
+series = pd.Series([1, 9, 8, 6, 2, 4, 3])
+multiples = series[series % 5 == 0]
+
+series = series[[0, 5, 4]]
+
+exam_data = {
+        'name': ['Anastasia', 'Dima', 'Katherine', 'James', 'Emily', 'Michael', 'Matthew', 'Laura', 'Kevin', 'Jonas'],
+    'score': [12.5, 9, 16.5, np.nan, 9, 20, 14.5, np.nan, 8, 19],
+    'attempts': [1, 3, 2, 3, 2, 3, 1, 1, 2, 1],
+    'qualify': ['yes', 'no', 'yes', 'no', 'no', 'yes', 'yes', 'no', 'no', 'yes']
+}
+labels = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
+
+df = pd.DataFrame(exam_data, index=labels)
+df[:3]
+df[["name", "score"]]
+df[["name", "score"]].iloc[[1,3,5,6]]
+df[df["attempts"] > 2]
+df[df["score"].isna()]
+len(df)
+
+df[df["score"].between(15, 20)]
+df[(df["score"] > 15) & (df["attempts"] < 2)]
+len(df.columns)
+
+df["attempts"].sum()
+df["score"].mean()
+df.loc["k"] = {"name": "Suresh", "score": 15.5, "attempts": 1, "qualify": "yes"}
 import pdb; pdb.set_trace()

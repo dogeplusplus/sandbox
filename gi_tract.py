@@ -1,4 +1,5 @@
 import cv2
+import shutil
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -42,10 +43,13 @@ def generate_mask(segments: pd.DataFrame, image_size: np.ndarray) -> np.ndarray:
     return mask
 
 
-def generate_masks(df: pd.DataFrame, data_dir: Path, label_dir: Path):
+def preprocess_dataset(df: pd.DataFrame, input_dir: Path, dataset_dir: Path):
+    image_dir = dataset_dir / "images"
+    label_dir = dataset_dir / "labels"
+    image_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
 
-    for case_dir in data_dir.iterdir():
+    for case_dir in input_dir.iterdir():
         for case_day in case_dir.iterdir():
             case = case_day.name
             for scan in (case_day / "scans").iterdir():
@@ -58,13 +62,15 @@ def generate_masks(df: pd.DataFrame, data_dir: Path, label_dir: Path):
                 slice_id = f"{case}_slice_{slice_num}"
                 rows = df.loc[df["id"] == slice_id]
                 mask = generate_mask(rows, (width, height))
-                destination = Path(label_dir, f"{slice_id}.png")
-                cv2.imwrite(str(destination), mask)
+                image_path = image_dir / f"{slice_id}.png"
+                label_path = label_dir / f"{slice_id}.png"
+                shutil.copy(scan, image_path)
+                cv2.imwrite(str(label_path), mask)
 
 
 def main():
-    data_dir = Path("train")
-    cases = list(data_dir.iterdir())
+    input_dir = Path("train")
+    cases = list(input_dir.iterdir())
 
     idx = 10
     case = cases[idx]
@@ -79,13 +85,13 @@ def main():
     from collections import Counter
     # image_shapes = Counter([cv2.imread(str(p), cv2.IMREAD_ANYDEPTH).shape for p in scans])
 
-    # all_images = list(data_dir.rglob("*/**/*.png"))
+    # all_images = list(input_dir.rglob("*/**/*.png"))
     # image_shapes = Counter([cv2.imread(str(p), cv2.IMREAD_ANYDEPTH).shape for p in all_images])
 
     labels_path = Path("train.csv")
     df = pd.read_csv(labels_path)
-    label_dir = Path("labels")
-    generate_masks(df, data_dir, label_dir)
+    label_dir = Path("gi_tract_dataset")
+    preprocess_dataset(df, input_dir, label_dir)
 
 
 

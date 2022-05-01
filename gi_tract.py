@@ -17,32 +17,49 @@ def parse_segmentation(
     label: str,
     image_size: np.ndarray,
 ) -> np.ndarray:
-    mask = np.zeros(image_size)
+    flat_mask = np.zeros(np.product(image_size), dtype=np.uint16)
+    runs = [int(x) for x in rle_segmentation.split()]
 
-    coordinates = [int(x) for x in rle_segmentation.split()]
-    coordinates = list(zip(coordinates[::2], coordinates[1::2]))
+    for idx in range(0, len(runs), 2):
+        start = runs[idx]
+        length = runs[idx+1]
+        flat_mask[start:start+length] = CLASS_MAPPING[label]
 
-    for y, x in coordinates:
-        mask[y, x] = CLASS_MAPPING[label]
+    mask = np.reshape(flat_mask, image_size)
+    return mask
+
+
+def generate_mask(segments: pd.DataFrame, image_size: np.ndarray) -> np.ndarray:
+    mask = np.zeros(image_size, dtype=np.uint16)
+
+    for _, seg in segments.iterrows():
+        if pd.isna(seg["segmentation"]):
+            continue
+        segment_mask = parse_segmentation(seg["segmentation"], seg["class"], image_size)
+        # Avoid cases where the RLE mask overlap
+        mask = np.maximum(mask, segment_mask)
 
     return mask
 
 
-def read_labels(df_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(df_path)
-    import pdb; pdb.set_trace()
-    # df["mask"] = df["segmentation"].apply(parse_segmentation)
-
-
 def generate_masks(df: pd.DataFrame, data_dir: Path, label_dir: Path):
-
     label_dir.mkdir(parents=True, exist_ok=True)
 
-    for case in data_dir.iterdir():
-        for day in case.iterdir():
-            for scan in (day / "scans").iterdir():
+    for case_dir in data_dir.iterdir():
+        for case_day in case_dir.iterdir():
+            case = case_day.name
+            for scan in (case_day / "scans").iterdir():
                 parts = scan.stem.split("_")
                 _, slice_num, height, width, pixel_height, pixel_width = parts
+                height = int(height)
+                width = int(width)
+                pixel_height = float(pixel_height)
+                pixel_width = float(pixel_width)
+                slice_id = f"{case}_slice_{slice_num}"
+                rows = df.loc[df["id"] == slice_id]
+                mask = generate_mask(rows, (width, height))
+                destination = Path(label_dir, f"{slice_id}.png")
+                cv2.imwrite(str(destination), mask)
 
 
 def main():
@@ -66,7 +83,11 @@ def main():
     # image_shapes = Counter([cv2.imread(str(p), cv2.IMREAD_ANYDEPTH).shape for p in all_images])
 
     labels_path = Path("train.csv")
-    read_labels(labels_path)
+    df = pd.read_csv(labels_path)
+    label_dir = Path("labels")
+    generate_masks(df, data_dir, label_dir)
+
+
 
 
 if __name__ == "__main__":

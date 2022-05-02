@@ -108,14 +108,13 @@ class GITract(Dataset):
 
 def collate_fn(batch, image_size=320):
     resize_layer = transforms.Resize((image_size, image_size))
-    vresize = np.vectorize(lambda x: resize_layer(rearrange(x, "2 1 h w")))
+    resize = lambda x: resize_layer(rearrange(x, "h w -> 1 h w"))
 
     images, labels = zip(*batch)
-    images = vresize(images)
-    labels = vresize(labels)
+    images = [resize(x) for x in images]
+    labels = [resize(y) for y in labels]
 
     return torch.cat(images), torch.cat(labels)
-
 
 
 @dataclass
@@ -164,7 +163,7 @@ def main():
     val_ds = DataLoader(val_ds, batch_size, shuffle=True, collate_fn=collate_fn)
 
     for x, y in train_ds:
-        import pdb; pdb.set_trace()
+        pass
 
 
 if __name__ == "__main__":

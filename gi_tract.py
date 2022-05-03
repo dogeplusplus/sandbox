@@ -1,9 +1,11 @@
 import cv2
 import torch
+import torch.nn as nn
 import shutil
 import typing as t
 import numpy as np
 import pandas as pd
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 from einops import rearrange
@@ -144,6 +146,85 @@ def split_train_test_cases(input_dir: Path, val_ratio: float) -> t.Tuple[DataPat
     return DataPaths(train_images, train_labels), DataPaths(val_images, val_labels)
 
 
+class DoubleConv(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, kernel_size: t.Tuple[int, int] = (7, 7)):
+        super().__init__()
+        self.norm = nn.InstanceNorm2d(in_dim)
+        self.conv1 = nn.Conv2d(in_dim, out_dim, kernel_size, padding="same")
+        self.act1 = nn.GELU()
+        self.conv2 = nn.Conv2d(out_dim, out_dim, kernel_size, padding="same")
+        self.act2 = nn.GELU()
+
+    def forward(self, x):
+        x = self.norm(x)
+        x = self.conv1(x)
+        x = self.act1(x)
+        x = self.conv2(x)
+        x = self.act2(x)
+
+        return x
+
+
+class UNet(nn.Module):
+    def __init__(self, filters: t.List[int], in_dim: int, out_dim: int, kernel_size: t.Tuple[int, int]):
+        super().__init__()
+        # Split filters into respective segments
+        bottom_filters = filters[-1]
+        down_filters = [in_dim] + filters
+        up_filters = filters[::-1] + [out_dim]
+
+        self.kernel_size = kernel_size
+
+        down_pairs = zip(down_filters[:-1], down_filters[1:])
+        up_pairs = zip(up_filters[:-1], up_filters[1:])
+        self.down = [
+            DoubleConv(cin, cout, kernel_size) for (cin, cout) in down_pairs
+        ]
+
+        # Double the in channels due to concatenation
+        self.up = [
+            DoubleConv(2 * cin, cout, kernel_size) for (cin, cout) in up_pairs
+        ]
+        self.bottom = DoubleConv(down_filters[-1], bottom_filters, kernel_size)
+
+        self.final = nn.Conv2d(out_dim, out_dim, kernel_size=(1, 1))
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x):
+        down_stack = []
+        for layer in self.down:
+            x = layer(x)
+            down_stack.insert(0, x)
+            x = F.max_pool2d(x, (2, 2))
+
+        x = self.bottom(x)
+
+
+        for down, layer in zip(down_stack, self.up):
+            x = F.interpolate(x, scale_factor=(2, 2), mode="nearest")
+            x = torch.cat([x, down], dim=1)
+            x = layer(x)
+
+
+        x = self.final(x)
+        x = self.softmax(x)
+
+        return x
+
+
+def test_unet():
+    filters = [64, 128, 256, 512]
+    channels = 1
+    num_classes = 3
+
+    model = UNet(filters, channels, num_classes, kernel_size=(3, 3))
+
+    x = torch.ones((1, 1, 512, 512))
+    y = model(x)
+
+    assert y.shape == (1, 3, 512, 512)
+
+
 def main():
     input_dir = Path("train")
     labels_path = Path("train.csv")
@@ -163,7 +244,11 @@ def main():
     val_ds = DataLoader(val_ds, batch_size, shuffle=True, collate_fn=collate_fn)
 
     for x, y in train_ds:
-        pass
+        fig, ax = plt.subplots(1, 2)
+        ax[0].matshow(x[8])
+        ax[1].matshow(y[8])
+        plt.show()
+        break
 
 
 if __name__ == "__main__":

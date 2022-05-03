@@ -1,4 +1,5 @@
 import cv2
+import pytest
 import torch
 import torch.nn as nn
 import shutil
@@ -212,8 +213,8 @@ class UNet(nn.Module):
         return x
 
 
-def test_unet():
-    filters = [64, 128, 256, 512]
+@pytest.mark.parametrize("filters", [[32] * i for i in range(1, 6)])
+def test_unet(filters ):
     channels = 1
     num_classes = 3
 
